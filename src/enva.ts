@@ -6,6 +6,7 @@ export {Cursor} from "./object/Cursor";
 export {Measurement} from "./object/Measurement";
 export {PhysicsObject} from "./object/PhysicsObject";
 export {LightProbe} from "./object/LightProbe";
+export {LightLogger} from "./object/LightLogger";
 export {FloorPlane} from "./object/FloorPlane";
 export {Planes, PlaneData} from "./object/Planes";
 export {ImageTracking} from "./object/ImageTracking";

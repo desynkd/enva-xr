@@ -45,6 +45,10 @@
       "source": "example/light-probe.html",
       "distDir": "./dist/examples/light-probe"
     },
+    "example-pilot-logger": {
+      "source": "example/pilot-logger.html",
+      "distDir": "./dist/examples/pilot-logger"
+    },
     "example-multi-feature": {
       "source": "example/multi-feature.html",
       "distDir": "./dist/examples/multi-feature"
