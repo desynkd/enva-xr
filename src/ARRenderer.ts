@@ -208,6 +208,11 @@ export class ARRenderer
 			config.requiredFeatures.push("light-estimation");
 		}
 
+		if (this.config.cameraAccess)
+		{
+			config.requiredFeatures.push("camera-access");
+		}
+
 		if (this.config.imageTracking) 
 		{
 			if (!(this.config.imageTracking instanceof Array)) 

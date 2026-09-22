@@ -51,6 +51,15 @@ export class ARRendererConfig
 	public reflectionCubeMap?: boolean = false;
 
 	/**
+	 * Camera access provides the camera image of each view as a WebGL texture, through xrGlBinding.getCameraImage(view.camera).
+	 *
+	 * The texture is only valid during the frame it was obtained in.
+	 *
+	 * More information about the feature https://immersive-web.github.io/raw-camera-access/
+	 */
+	public cameraAccess?: boolean = false;
+
+	/**
 	 * Depth information captured from the environment.
 	 */
 	public depthSensing?: boolean = false;
