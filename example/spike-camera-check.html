@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+		<meta name="HandheldFriendly" content="true" />
+		<title>Spike 1 - camera-access check</title>
+		<style>
+			body { margin: 0; font-family: monospace; background: #111; color: #eee; }
+			#start { display: block; position: absolute; background-color: #FF6666; width: 100%; height: 100%; top: 0px; left: 0px; border: 0; text-align: center; font-family: Arial, Helvetica, sans-serif; font-size: 8vh; }
+			#overlay { position: absolute; inset: 0; pointer-events: none; }
+			#log { margin: 8px; padding: 8px; background: rgba(0, 0, 0, 0.6); color: #0f0; font-size: 12px; white-space: pre-wrap; }
+			#stop { pointer-events: auto; position: absolute; right: 8px; bottom: 8px; padding: 12px 16px; font-size: 16px; }
+		</style>
+	</head>
+	<body>
+		<button id="start">Start AR<br/>(camera-access check)</button>
+		<div id="overlay">
+			<pre id="log">Loading...</pre>
+			<button id="stop" style="display: none">End session</button>
+		</div>
+		<script type="module">
+			// Spike 1, step 1: go/no-go for assumptions 1 (camera-access supported) and
+			// 2 (it coexists with hit-test, anchors and light-estimation in one session).
+			// Plain WebXR + WebGL2, no Enva-XR or three.js, so any failure is the browser's.
+
+			const FEATURES = ["camera-access", "hit-test", "anchors", "light-estimation"];
+
+			const logEl = document.getElementById("log");
+			const startBtn = document.getElementById("start");
+			const stopBtn = document.getElementById("stop");
+
+			const info = [];
+			const stats = {
+				frames: 0,
+				framesWithCamera: 0,
+				framesWithTexture: 0,
+				cameraSize: null,
+				getCameraImageMs: [],
+				lightEstimates: 0,
+				lastLightDir: null,
+				hitResults: 0,
+				anchor: "not tried",
+				poseEmulated: null,
+				errors: [],
+				windowStart: 0,
+				windowFrames: 0,
+				windowCameraFrames: 0,
+				fps: 0,
+				cameraFps: 0
+			};
+
+			function render() {
+				const avg = (a) => a.length ? (a.reduce((x, y) => x + y, 0) / a.length).toFixed(3) : "-";
+				const s = stats;
+				logEl.textContent = [
+					...info,
+					"",
+					"frames:              " + s.frames + "  (" + s.fps.toFixed(1) + " fps)",
+					"frames with camera:  " + s.framesWithCamera + "  (" + s.cameraFps.toFixed(1) + " /s)",
+					"frames with texture: " + s.framesWithTexture,
+					"camera image size:   " + (s.cameraSize || "-"),
+					"getCameraImage avg:  " + avg(s.getCameraImageMs) + " ms",
+					"light estimates:     " + s.lightEstimates,
+					"primaryLightDir:     " + (s.lastLightDir || "-"),
+					"hit-test results:    " + s.hitResults,
+					"anchor:              " + s.anchor,
+					"viewer pose emulated:" + (s.poseEmulated === null ? " -" : " " + s.poseEmulated),
+					...(s.errors.length ? ["", "ERRORS:", ...s.errors.slice(-5)] : [])
+				].join("\n");
+			}
+
+			function fail(where, e) {
+				const msg = where + ": " + (e && e.message ? e.message : e);
+				console.error(msg, e);
+				stats.errors.push(msg);
+				render();
+			}
+
+			(async function () {
+				info.push("UA: " + navigator.userAgent);
+				if (!navigator.xr) {
+					info.push("navigator.xr missing - is this page on HTTPS?");
+					render();
+					return;
+				}
+				const supported = await navigator.xr.isSessionSupported("immersive-ar");
+				info.push("immersive-ar supported: " + supported);
+				render();
+
+				startBtn.onclick = () => start().catch((e) => fail("start", e));
+			})();
+
+			async function start() {
+				// All four as optional so the session starts even if one is missing,
+				// then enabledFeatures tells us exactly which ones were granted.
+				const session = await navigator.xr.requestSession("immersive-ar", {
+					optionalFeatures: [...FEATURES, "dom-overlay"],
+					domOverlay: {root: document.getElementById("overlay")}
+				});
+
+				startBtn.style.display = "none";
+				stopBtn.style.display = "block";
+				stopBtn.onclick = () => session.end();
+				session.addEventListener("end", () => {
+					info.push("", "Session ended.");
+					render();
+					stopBtn.style.display = "none";
+				});
+
+				const enabled = session.enabledFeatures ? Array.from(session.enabledFeatures) : null;
+				info.push("");
+				info.push("enabledFeatures: " + (enabled ? enabled.join(", ") : "(not exposed)"));
+				for (const f of FEATURES) {
+					info.push("  " + f.padEnd(17) + (enabled ? (enabled.includes(f) ? "GRANTED" : "MISSING") : "?"));
+				}
+
+				const canvas = document.createElement("canvas");
+				const gl = canvas.getContext("webgl2", {xrCompatible: true, alpha: true});
+				info.push("WebGL2 context: " + (gl ? "yes" : "NO"));
+				await session.updateRenderState({baseLayer: new XRWebGLLayer(session, gl)});
+
+				const refSpace = await session.requestReferenceSpace("local");
+				const viewerSpace = await session.requestReferenceSpace("viewer");
+
+				let binding = null;
+				try {
+					binding = new XRWebGLBinding(session, gl);
+				} catch (e) {
+					fail("XRWebGLBinding", e);
+				}
+
+				let hitSource = null;
+				try {
+					hitSource = await session.requestHitTestSource({space: viewerSpace});
+				} catch (e) {
+					fail("requestHitTestSource", e);
+				}
+
+				let lightProbe = null;
+				try {
+					lightProbe = await session.requestLightProbe();
+				} catch (e) {
+					fail("requestLightProbe", e);
+				}
+
+				render();
+				stats.windowStart = performance.now();
+				let lastRender = 0;
+
+				const onFrame = (time, frame) => {
+					session.requestAnimationFrame(onFrame);
+					stats.frames++;
+					stats.windowFrames++;
+
+					const layer = session.renderState.baseLayer;
+					gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
+					gl.clearColor(0, 0, 0, 0);
+					gl.clear(gl.COLOR_BUFFER_BIT);
+
+					const pose = frame.getViewerPose(refSpace);
+					if (pose) {
+						stats.poseEmulated = pose.emulatedPosition;
+						// The camera image belongs to this view, so view.transform is the pose it was taken from.
+						const view = pose.views[0];
+						if (view.camera) {
+							stats.framesWithCamera++;
+							stats.windowCameraFrames++;
+							stats.cameraSize = view.camera.width + " x " + view.camera.height;
+							if (binding) {
+								try {
+									const t0 = performance.now();
+									const tex = binding.getCameraImage(view.camera);
+									stats.getCameraImageMs.push(performance.now() - t0);
+									if (stats.getCameraImageMs.length > 120) {
+										stats.getCameraImageMs.shift();
+									}
+									if (tex) {
+										stats.framesWithTexture++;
+									}
+								} catch (e) {
+									fail("getCameraImage", e);
+									binding = null;
+								}
+							}
+						}
+					}
+
+					if (lightProbe) {
+						const estimate = frame.getLightEstimate(lightProbe);
+						if (estimate) {
+							stats.lightEstimates++;
+							const d = estimate.primaryLightDirection;
+							stats.lastLightDir = [d.x, d.y, d.z].map((v) => v.toFixed(2)).join(", ");
+						}
+					}
+
+					if (hitSource) {
+						const hits = frame.getHitTestResults(hitSource);
+						if (hits.length) {
+							stats.hitResults++;
+							if (stats.anchor === "not tried" && hits[0].createAnchor) {
+								stats.anchor = "requested...";
+								hits[0].createAnchor().then(
+									() => { stats.anchor = "created OK"; },
+									(e) => { stats.anchor = "FAILED: " + e.message; }
+								);
+							}
+						}
+					}
+
+					const now = performance.now();
+					if (now - stats.windowStart >= 1000) {
+						const secs = (now - stats.windowStart) / 1000;
+						stats.fps = stats.windowFrames / secs;
+						stats.cameraFps = stats.windowCameraFrames / secs;
+						stats.windowStart = now;
+						stats.windowFrames = 0;
+						stats.windowCameraFrames = 0;
+					}
+					if (now - lastRender > 250) {
+						lastRender = now;
+						render();
+					}
+				};
+				session.requestAnimationFrame(onFrame);
+			}
+		</script>
+	</body>
+</html>
