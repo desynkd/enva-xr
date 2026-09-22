@@ -84,5 +84,17 @@
     "typescript": "5.0.2",
     "cannon-es": "^0.20.0",
     "three": "^0.150.0"
+  },
+  "overrides": {
+    "@parcel/cache": "2.8.3",
+    "@parcel/core": "2.8.3",
+    "@parcel/diagnostic": "2.8.3",
+    "@parcel/fs": "2.8.3",
+    "@parcel/logger": "2.8.3",
+    "@parcel/package-manager": "2.8.3",
+    "@parcel/plugin": "2.8.3",
+    "@parcel/types": "2.8.3",
+    "@parcel/utils": "2.8.3",
+    "@parcel/workers": "2.8.3"
   }
 }
