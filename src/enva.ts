@@ -7,6 +7,7 @@ export {Measurement} from "./object/Measurement";
 export {PhysicsObject} from "./object/PhysicsObject";
 export {LightProbe} from "./object/LightProbe";
 export {LightLogger} from "./object/LightLogger";
+export {CameraGrab, CameraGrabMode} from "./object/CameraGrab";
 export {FloorPlane} from "./object/FloorPlane";
 export {Planes, PlaneData} from "./object/Planes";
 export {ImageTracking} from "./object/ImageTracking";
