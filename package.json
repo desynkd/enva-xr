@@ -49,6 +49,10 @@
       "source": "example/pilot-logger.html",
       "distDir": "./dist/examples/pilot-logger"
     },
+    "example-spike-camera": {
+      "source": "example/spike-camera.html",
+      "distDir": "./dist/examples/spike-camera"
+    },
     "example-multi-feature": {
       "source": "example/multi-feature.html",
       "distDir": "./dist/examples/multi-feature"

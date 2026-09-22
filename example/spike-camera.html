@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+		<meta name="HandheldFriendly" content="true" />
+		<style>
+			#panel { position: absolute; left: 0px; right: 0px; bottom: 0px; padding: 8px; background: rgba(0, 0, 0, 0.5); color: #FFFFFF; font-family: monospace; font-size: 12px; }
+			#panel button { font-size: 14px; padding: 8px; margin: 2px; }
+			#panel input { font-size: 14px; width: 45%; }
+			#status { white-space: pre; margin-bottom: 4px; }
+			#preview { position: absolute; top: 8px; right: 8px; width: 96px; height: 96px; border: 2px solid #FFFF00; image-rendering: pixelated; background: #000000; }
+		</style>
+	  </head>
+	<body>
+		<button id="start" style="display: block; position: absolute; background-color: #FF6666; width: 100%; height: 100%; top: 0px; left: 0px; text-align: center; font-family: Arial, Helvetica, sans-serif; font-size: 10vh">
+			Start AR<br/>(spike 1)
+		</button>
+		<canvas id="preview" width="256" height="256"></canvas>
+		<div id="panel">
+			<div id="status"></div>
+			<button id="mode">Mode: off</button>
+			<button id="every">Every 1</button>
+			<button id="flip">Flip Y: on</button><br />
+			<input id="label" type="text" value="S1-off" />
+			<button id="record">Start</button>
+			<button id="download">Download</button>
+		</div>
+        <script async src="./lib/es-module-shims.js"></script>
+        <script type="importmap">
+			{
+				"imports": {
+					"three": "./lib/three.module.js"
+				}
+			}
+		</script>
+        <script type="module">
+            import {Mesh, MeshPhysicalMaterial, SphereGeometry, AmbientLight} from "three";
+            import {ARRenderer, Cursor, LightProbe, LightLogger, FloorPlane, CameraGrab} from "../src/enva.ts";
+
+            // Spike 1: grab the camera picture every frame, shrink it to 256x256 on the GPU and copy it into memory,
+            // while Enva-XR draws a shadowed scene, so the frame time is measured in the app we will actually use.
+            (async function () {
+                const renderer = new ARRenderer({
+                    domOverlay: true,
+                    hitTest: true,
+                    lightProbe: true,
+                    cameraAccess: true,
+                    useWebGL2: true
+                });
+
+                renderer.scene.add(new AmbientLight(0x333333));
+
+                let lightProbe = new LightProbe();
+                renderer.scene.add(lightProbe);
+
+                let logger = new LightLogger();
+                renderer.scene.add(logger);
+
+                let grab = new CameraGrab();
+                renderer.scene.add(grab);
+
+                let cursor = new Cursor();
+                renderer.scene.add(cursor);
+
+                let floor = new FloorPlane();
+                renderer.scene.add(floor);
+
+                renderer.domContainer.ondblclick = function(event) {
+                    if (cursor.visible) {
+                        let material = new MeshPhysicalMaterial({color: (Math.random() * 0xFFFFFF)});
+
+                        let sphere = new Mesh(new SphereGeometry(), material);
+                        sphere.receiveShadow = true;
+                        sphere.castShadow = true;
+                        sphere.scale.setScalar(0.1);
+                        sphere.position.copy(cursor.position);
+                        sphere.position.y += sphere.scale.y / 2.0;
+                        renderer.scene.add(sphere);
+                    }
+                };
+
+                const panel = document.getElementById("panel");
+                const status = document.getElementById("status");
+                const label = document.getElementById("label");
+                const record = document.getElementById("record");
+                const modeButton = document.getElementById("mode");
+                const everyButton = document.getElementById("every");
+                const flipButton = document.getElementById("flip");
+                const preview = document.getElementById("preview");
+                const previewContext = preview.getContext("2d");
+                let previewImage = null;
+                let previewCopies = 0;
+
+                renderer.domContainer.appendChild(panel);
+                renderer.domContainer.appendChild(preview);
+
+                // Taps on the panel must not place spheres or trigger XR select events
+                panel.addEventListener("dblclick", (e) => e.stopPropagation());
+                panel.addEventListener("beforexrselect", (e) => e.preventDefault());
+
+                const MODES = ["off", "sync", "async"];
+                modeButton.onclick = () => {
+                    grab.mode = MODES[(MODES.indexOf(grab.mode) + 1) % MODES.length];
+                    modeButton.textContent = "Mode: " + grab.mode;
+                    if (!logger.recording) {
+                        label.value = "S1-" + grab.mode;
+                    }
+                };
+
+                const EVERY = [1, 3, 6];
+                everyButton.onclick = () => {
+                    grab.every = EVERY[(EVERY.indexOf(grab.every) + 1) % EVERY.length];
+                    everyButton.textContent = "Every " + grab.every;
+                };
+
+                flipButton.onclick = () => {
+                    grab.flipY = !grab.flipY;
+                    flipButton.textContent = "Flip Y: " + (grab.flipY ? "on" : "off");
+                };
+
+                record.onclick = () => {
+                    if (logger.recording) {
+                        logger.stop();
+                        grab.stop();
+                        record.textContent = "Start";
+                    } else {
+                        logger.label = label.value;
+                        logger.start();
+                        grab.start();
+                        record.textContent = "Stop";
+                    }
+                };
+
+                // Two files: <label>.json from the logger (dt column) and <label>-grab.json with one row per copy
+                document.getElementById("download").onclick = () => {
+                    logger.download();
+                    grab.download(label.value);
+                };
+
+                // Frame time over the last 60 frames
+                const dts = [];
+                let lastTime = NaN;
+
+                const ms = (v) => Number.isFinite(v) ? v.toFixed(2) : "-";
+                const stat = (r) => ms(r.avg()) + " / " + ms(r.max());
+
+                renderer.onFrame = (time) => {
+                    if (Number.isFinite(lastTime)) {
+                        dts.push(time - lastTime);
+                        if (dts.length > 60) {
+                            dts.shift();
+                        }
+                    }
+                    lastTime = time;
+
+                    // Show the copied picture, so what the estimator would get can be checked by eye
+                    if (grab.pixels && grab.copies !== previewCopies && logger.frameCount % 5 === 0) {
+                        previewCopies = grab.copies;
+                        if (!previewImage) {
+                            previewImage = new ImageData(new Uint8ClampedArray(grab.pixels.buffer), grab.width, grab.height);
+                            preview.style.height = Math.round(96 * grab.cameraHeight / grab.cameraWidth) + "px";
+                        }
+                        previewContext.putImageData(previewImage, 0, 0);
+                    }
+
+                    if (logger.frameCount % 10 !== 0) {
+                        return;
+                    }
+
+                    const dtAvg = dts.reduce((a, b) => a + b, 0) / dts.length;
+                    const s = grab.stats;
+
+                    status.textContent =
+                        "frames " + logger.frameCount + "  rows " + logger.rowCount + (logger.recording ? "  REC" : "") + (logger.saved ? "" : "  unsaved") + "\n" +
+                        "dt avg/max  " + ms(dtAvg) + " / " + ms(Math.max(...dts)) + " ms  (" + (1000 / dtAvg).toFixed(1) + " fps)\n" +
+                        "camera " + grab.cameraWidth + "x" + grab.cameraHeight + "  grabs " + grab.grabs + "  copies " + grab.copies + "  skipped " + grab.skipped + "\n" +
+                        "avg/max ms  getImage " + stat(s.getCameraImage) + "\n" +
+                        "  shrink " + stat(s.shrink) + "  read " + stat(s.read) + "\n" +
+                        "  fetch " + stat(s.fetch) + "  latency " + ms(s.latency.avg()) + " fr\n" +
+                        "  total " + stat(s.total) + "\n" +
+                        "luma " + ms(grab.luma) + "  unsat " + ms(grab.lumaUnsaturated) + "  sat " + ms(grab.saturated * 100) + "%\n" +
+                        "light " + (logger.latestDirection ? logger.latestDirection.map((x) => x.toFixed(2)).join(", ") : "-") + "  updates " + logger.updates +
+                        (grab.error ? "\nERROR " + grab.error : "");
+                };
+
+                var button = document.getElementById("start");
+                button.onclick = () =>
+                {
+                    renderer.start().catch((e) => { alert("Could not start AR: " + e.message); });
+                };
+            })();
+        </script>
+	</body>
+</html>
