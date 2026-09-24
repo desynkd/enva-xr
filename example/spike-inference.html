@@ -127,6 +127,7 @@
                 let busySkips = 0;
                 let waiting = false;
                 let lastSend = 0;
+                let lost = 0;
                 let lastDirection = null;
                 let workerError = null;
                 let records = [];
@@ -156,6 +157,8 @@
                             records.push([m.t, m.frame, MODELS.indexOf(model) + 1, BACKENDS.indexOf(backend) + 1,
                                 m.prepMs, m.inferMs, performance.now() - m.sentAt, ...m.direction, ...m.pose]);
                         }
+                    } else if (m.type === "stale") {
+                        waiting = false;
                     } else if (m.type === "error") {
                         state = "ERROR";
                         workerError = m.message;
@@ -284,6 +287,11 @@
 
                     // Send the newest picture to the worker, at the chosen rate, never more than one at a time
                     const now = performance.now();
+                    if (waiting && now - lastSend > 5000) {
+                        waiting = false;
+                        lost++;
+                    }
+
                     if (rate && state === "ready" && grab.pixels && grab.copies !== previewCopies) {
                         if (now - lastSend >= 1000 / rate) {
                             if (waiting) {
@@ -320,7 +328,7 @@
                         "dt avg/max  " + ms(dtAvg) + " / " + ms(Math.max(...dts)) + " ms  (" + (1000 / dtAvg).toFixed(1) + " fps)\n" +
                         "grab " + ms(avg(grab.stats.total.values)) + " ms  copies " + grab.copies + "  spheres " + spheres + "\n" +
                         "net " + model + "/" + backend + "  " + state + "  threads " + threads + "\n" +
-                        "sent " + sent + "  done " + done + "  busy " + busySkips + "\n" +
+                        "sent " + sent + "  done " + done + "  busy " + busySkips + "  lost " + lost + "\n" +
                         "infer avg/p95/max  " + ms(avg(inference)) + " / " + ms(pct(inference, 95)) + " / " + ms(Math.max(...inference, NaN)) + " ms\n" +
                         "roundtrip avg " + ms(avg(latency)) + " ms  answers " + (done && dts.length ? (1000 / (avg(latency) || 1)).toFixed(1) : "-") + "/s cap\n" +
                         "warmup " + (warmup.length ? warmup.map((v) => v.toFixed(0)).join(", ") + " ms" : "-") + "\n" +

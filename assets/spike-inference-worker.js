@@ -130,7 +130,9 @@ self.onmessage = async (e) =>
 
 			if (running !== session)
 			{
-				// Another network was loaded while this ran, so the answer belongs to nothing
+				// Another network was loaded while this ran, so the answer belongs to nothing.
+				// The page is still told, otherwise it waits for a reply that never comes.
+				self.postMessage({type: "stale", sentAt: message.sentAt});
 				return;
 			}
 
