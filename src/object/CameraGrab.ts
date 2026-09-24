@@ -154,6 +154,16 @@ export class CameraGrab extends Group implements ARObject
 	 */
 	public skipped = 0;
 
+	/**
+	 * Whether the last frame had a viewer pose. Without one there are no views, so no camera image.
+	 */
+	public hasPose = false;
+
+	/**
+	 * Frames where a grab failed but the capture carried on. The last message is kept in error.
+	 */
+	public errors = 0;
+
 	public error: string = null;
 
 	/**
@@ -218,8 +228,12 @@ export class CameraGrab extends Group implements ARObject
 	{
 		this.frameCount++;
 
-		const view: any = renderer.xrViews.length > 0 ? renderer.xrViews[0] : null;
+		// The views must come from the pose of this frame. renderer.xrViews keeps the views of the last frame that had a
+		// pose, and asking those for a camera image throws, because their frame is no longer the active one.
+		const pose = renderer.xrViewerPose;
+		const view: any = pose && pose.views.length > 0 ? pose.views[0] : null;
 		const camera = view ? view.camera : null;
+		this.hasPose = pose !== null && pose !== undefined;
 		if (camera)
 		{
 			this.framesWithCamera++;
@@ -244,12 +258,14 @@ export class CameraGrab extends Group implements ARObject
 		const three = renderer.renderer;
 		const renderTarget = three.getRenderTarget();
 		const t0 = performance.now();
+		let ready = this.gl === gl;
 
 		try
 		{
-			if (this.gl !== gl)
+			if (!ready)
 			{
 				this.setup(gl);
+				ready = true;
 			}
 
 			this.poll();
@@ -261,7 +277,17 @@ export class CameraGrab extends Group implements ARObject
 		}
 		catch (e)
 		{
-			this.fail(e && e.message ? e.message : String(e));
+			const message = e && e.message ? e.message : String(e);
+			if (ready)
+			{
+				// A single bad frame (e.g. tracking dropped) must not end the capture
+				this.errors++;
+				this.error = message;
+			}
+			else
+			{
+				this.fail(message);
+			}
 		}
 		finally
 		{

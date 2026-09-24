@@ -21,7 +21,8 @@
 			<div id="status"></div>
 			<button id="mode">Mode: off</button>
 			<button id="every">Every 1</button>
-			<button id="flip">Flip Y: on</button><br />
+			<button id="flip">Flip Y: on</button>
+			<button id="place">Place</button><br />
 			<input id="label" type="text" value="S1-off" />
 			<button id="record">Start</button>
 			<button id="download">Download</button>
@@ -66,18 +67,28 @@
                 let floor = new FloorPlane();
                 renderer.scene.add(floor);
 
-                renderer.domContainer.ondblclick = function(event) {
-                    if (cursor.visible) {
-                        let material = new MeshPhysicalMaterial({color: (Math.random() * 0xFFFFFF)});
-
-                        let sphere = new Mesh(new SphereGeometry(), material);
-                        sphere.receiveShadow = true;
-                        sphere.castShadow = true;
-                        sphere.scale.setScalar(0.1);
-                        sphere.position.copy(cursor.position);
-                        sphere.position.y += sphere.scale.y / 2.0;
-                        renderer.scene.add(sphere);
+                // Spheres cast the shadows, so the frame time is measured with a scene that is actually drawn
+                let spheres = 0;
+                function placeSphere() {
+                    if (!cursor.visible) {
+                        return false;
                     }
+
+                    let material = new MeshPhysicalMaterial({color: (Math.random() * 0xFFFFFF)});
+
+                    let sphere = new Mesh(new SphereGeometry(), material);
+                    sphere.receiveShadow = true;
+                    sphere.castShadow = true;
+                    sphere.scale.setScalar(0.1);
+                    sphere.position.copy(cursor.position);
+                    sphere.position.y += sphere.scale.y / 2.0;
+                    renderer.scene.add(sphere);
+                    spheres++;
+                    return true;
+                }
+
+                renderer.domContainer.ondblclick = function(event) {
+                    placeSphere();
                 };
 
                 const panel = document.getElementById("panel");
@@ -87,6 +98,7 @@
                 const modeButton = document.getElementById("mode");
                 const everyButton = document.getElementById("every");
                 const flipButton = document.getElementById("flip");
+                const placeButton = document.getElementById("place");
                 const downloadButton = document.getElementById("download");
                 const preview = document.getElementById("preview");
                 const previewContext = preview.getContext("2d");
@@ -116,6 +128,10 @@
                 everyButton.onclick = () => {
                     grab.every = EVERY[(EVERY.indexOf(grab.every) + 1) % EVERY.length];
                     everyButton.textContent = "Every " + grab.every;
+                };
+
+                placeButton.onclick = () => {
+                    placeButton.textContent = placeSphere() ? "Place" : "No floor";
                 };
 
                 flipButton.onclick = () => {
@@ -179,6 +195,7 @@
                         "frames " + logger.frameCount + "  rows " + logger.rowCount + (logger.recording ? "  REC" : "") + (logger.saved ? "" : "  unsaved") + "\n" +
                         "dt avg/max  " + ms(dtAvg) + " / " + ms(Math.max(...dts)) + " ms  (" + (1000 / dtAvg).toFixed(1) + " fps)\n" +
                         "camera " + grab.cameraWidth + "x" + grab.cameraHeight + "  grabs " + grab.grabs + "  copies " + grab.copies + "  skipped " + grab.skipped + "\n" +
+                        "pose " + (grab.hasPose ? "yes" : "NO") + "  cursor " + (cursor.visible ? "on floor" : "no floor") + "  spheres " + spheres + "  errors " + grab.errors + "\n" +
                         "avg/max ms  getImage " + stat(s.getCameraImage) + "\n" +
                         "  shrink " + stat(s.shrink) + "  read " + stat(s.read) + "\n" +
                         "  fetch " + stat(s.fetch) + "  latency " + ms(s.latency.avg()) + " fr\n" +
