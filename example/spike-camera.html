@@ -87,6 +87,7 @@
                 const modeButton = document.getElementById("mode");
                 const everyButton = document.getElementById("every");
                 const flipButton = document.getElementById("flip");
+                const downloadButton = document.getElementById("download");
                 const preview = document.getElementById("preview");
                 const previewContext = preview.getContext("2d");
                 let previewImage = null;
@@ -100,11 +101,14 @@
                 panel.addEventListener("beforexrselect", (e) => e.preventDefault());
 
                 const MODES = ["off", "sync", "async"];
+                const autoLabel = (mode) => "S1-" + mode;
                 modeButton.onclick = () => {
+                    // Android shows no keyboard inside AR, so the label follows the mode unless it was typed by hand
+                    const auto = MODES.some((m) => label.value === autoLabel(m));
                     grab.mode = MODES[(MODES.indexOf(grab.mode) + 1) % MODES.length];
                     modeButton.textContent = "Mode: " + grab.mode;
-                    if (!logger.recording) {
-                        label.value = "S1-" + grab.mode;
+                    if (!logger.recording && auto) {
+                        label.value = autoLabel(grab.mode);
                     }
                 };
 
@@ -133,7 +137,7 @@
                 };
 
                 // Two files: <label>.json from the logger (dt column) and <label>-grab.json with one row per copy
-                document.getElementById("download").onclick = () => {
+                downloadButton.onclick = () => {
                     logger.download();
                     grab.download(label.value);
                 };
@@ -187,7 +191,17 @@
                 var button = document.getElementById("start");
                 button.onclick = () =>
                 {
-                    renderer.start().catch((e) => { alert("Could not start AR: " + e.message); });
+                    renderer.domContainer.appendChild(panel);
+                    renderer.domContainer.appendChild(preview);
+                    renderer.start().then(() => {
+                        // The renderer takes its overlay out of the page when the session ends, so the panel is put back
+                        // to keep Download reachable outside AR, where the browser handles downloads normally
+                        renderer.xrSession.addEventListener("end", () => {
+                            document.body.appendChild(panel);
+                            document.body.appendChild(preview);
+                            button.textContent = "Start AR again";
+                        });
+                    }).catch((e) => { alert("Could not start AR: " + e.message); });
                 };
             })();
         </script>
