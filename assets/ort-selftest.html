@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html>
+	<head><meta charset="UTF-8" /><title>ORT self test</title></head>
+	<body>
+		<pre id="out">running</pre>
+		<script>
+			// Loads the spike 2 worker and runs one picture through it, with no AR involved.
+			// Used to check the runtime and the models load before taking the page to the phone.
+			const out = document.getElementById("out");
+			const backend = new URLSearchParams(location.search).get("backend") || "wasm";
+			const model = new URLSearchParams(location.search).get("model") || "small";
+			const log = (s) => { out.textContent = s; document.title = s.split("\n")[0]; };
+
+			const worker = new Worker("spike-inference-worker.js");
+			worker.onerror = (e) => { log("FAIL worker: " + e.message); };
+			worker.onmessage = (e) => {
+				const m = e.data;
+				if (m.type === "loaded") {
+					log("LOADED " + model + "/" + backend + "  threads=" + m.threads + " isolated=" + m.isolated +
+						"\nwarmup " + m.warmup.map((v) => v.toFixed(1)).join(", ") + " ms");
+					const pixels = new Uint8ClampedArray(256 * 256 * 4).fill(128);
+					worker.postMessage({type: "run", pixels: pixels.buffer, sentAt: performance.now(), t: 0, frame: 0, pose: [0, 0, 0, 0, 0, 0, 1]}, [pixels.buffer]);
+				} else if (m.type === "result") {
+					log("OK " + model + "/" + backend + "  infer=" + m.inferMs.toFixed(1) + " ms  prep=" + m.prepMs.toFixed(1) +
+						" ms  dir=" + m.direction.map((v) => v.toFixed(2)).join(","));
+				} else if (m.type === "error") {
+					log("FAIL " + model + "/" + backend + ": " + m.message);
+				}
+			};
+			log("loading " + model + "/" + backend + " (isolated=" + self.crossOriginIsolated + ")");
+			worker.postMessage({type: "load", model: model, backend: backend, size: 256});
+		</script>
+	</body>
+</html>
