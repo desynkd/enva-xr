@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+		<meta name="HandheldFriendly" content="true" />
+		<style>
+			#panel { position: absolute; left: 0px; right: 0px; bottom: 0px; padding: 8px; background: rgba(0, 0, 0, 0.5); color: #FFFFFF; font-family: monospace; font-size: 12px; }
+			#panel button { font-size: 14px; padding: 8px; margin: 2px; }
+			#panel input { font-size: 14px; width: 45%; }
+			#status { white-space: pre; margin-bottom: 4px; }
+			#preview { position: absolute; top: 8px; right: 8px; width: 96px; height: 96px; border: 2px solid #FFFF00; image-rendering: pixelated; background: #000000; }
+		</style>
+	  </head>
+	<body>
+		<button id="start" style="display: block; position: absolute; background-color: #FF6666; width: 100%; height: 100%; top: 0px; left: 0px; text-align: center; font-family: Arial, Helvetica, sans-serif; font-size: 10vh">
+			Start AR<br/>(spike 2)
+		</button>
+		<canvas id="preview" width="256" height="256"></canvas>
+		<div id="panel">
+			<div id="status"></div>
+			<button id="model">Model: small</button>
+			<button id="backend">Backend: wasm</button>
+			<button id="rate">10 /s</button>
+			<button id="place">Place</button><br />
+			<input id="label" type="text" value="S2-small-wasm" />
+			<button id="record">Start</button>
+			<button id="download">Download</button>
+		</div>
+        <script async src="./lib/es-module-shims.js"></script>
+        <script type="importmap">
+			{
+				"imports": {
+					"three": "./lib/three.module.js"
+				}
+			}
+		</script>
+        <script type="module">
+            import {Mesh, MeshPhysicalMaterial, SphereGeometry, AmbientLight} from "three";
+            import {ARRenderer, Cursor, LightProbe, LightLogger, FloorPlane, CameraGrab} from "../src/enva.ts";
+
+            // Spike 2: send the 256x256 picture from spike 1 to a network running in a background thread,
+            // and measure how long each answer takes and what it does to the AR frame time.
+            (async function () {
+                const renderer = new ARRenderer({
+                    domOverlay: true,
+                    hitTest: true,
+                    lightProbe: true,
+                    cameraAccess: true,
+                    useWebGL2: true
+                });
+
+                renderer.scene.add(new AmbientLight(0x333333));
+
+                let lightProbe = new LightProbe();
+                renderer.scene.add(lightProbe);
+
+                let logger = new LightLogger();
+                renderer.scene.add(logger);
+
+                // Spike 1 settled on the non-waiting copy
+                let grab = new CameraGrab();
+                grab.mode = "async";
+                renderer.scene.add(grab);
+
+                let cursor = new Cursor();
+                renderer.scene.add(cursor);
+
+                let floor = new FloorPlane();
+                renderer.scene.add(floor);
+
+                let spheres = 0;
+                function placeSphere() {
+                    if (!cursor.visible) {
+                        return false;
+                    }
+
+                    let sphere = new Mesh(new SphereGeometry(), new MeshPhysicalMaterial({color: (Math.random() * 0xFFFFFF)}));
+                    sphere.receiveShadow = true;
+                    sphere.castShadow = true;
+                    sphere.scale.setScalar(0.1);
+                    sphere.position.copy(cursor.position);
+                    sphere.position.y += sphere.scale.y / 2.0;
+                    renderer.scene.add(sphere);
+                    spheres++;
+                    return true;
+                }
+
+                renderer.domContainer.ondblclick = function(event) {
+                    placeSphere();
+                };
+
+                const panel = document.getElementById("panel");
+                const status = document.getElementById("status");
+                const label = document.getElementById("label");
+                const record = document.getElementById("record");
+                const modelButton = document.getElementById("model");
+                const backendButton = document.getElementById("backend");
+                const rateButton = document.getElementById("rate");
+                const placeButton = document.getElementById("place");
+                const downloadButton = document.getElementById("download");
+                const preview = document.getElementById("preview");
+                const previewContext = preview.getContext("2d");
+                let previewImage = null;
+                let previewCopies = 0;
+
+                // The worker is a plain file in assets, outside the bundle, so it can load onnxruntime itself.
+                // The URL is built at runtime so Parcel leaves the file alone instead of bundling it.
+                const worker = new Worker(new URL("spike-inference-worker.js", document.baseURI).href);
+
+                const MODELS = ["small", "medium", "large"];
+                const BACKENDS = ["wasm", "webgpu"];
+                const RATES = [10, 5, 0];
+
+                let model = MODELS[0];
+                let backend = BACKENDS[0];
+                let rate = RATES[0];
+
+                // Worker state
+                let state = "no model";
+                let threads = "-";
+                let warmup = [];
+                let inference = [];
+                let latency = [];
+                let sent = 0;
+                let done = 0;
+                let busySkips = 0;
+                let waiting = false;
+                let lastSend = 0;
+                let lastDirection = null;
+                let workerError = null;
+                let records = [];
+                let recording = false;
+
+                const keep = (a, v) => { a.push(v); if (a.length > 120) { a.shift(); } return a; };
+
+                worker.onmessage = (e) => {
+                    const m = e.data;
+                    if (m.type === "loaded") {
+                        state = "ready";
+                        threads = m.threads + (m.isolated ? "" : " (not isolated)");
+                        warmup = m.warmup;
+                        inference = [];
+                        latency = [];
+                        sent = 0;
+                        done = 0;
+                        busySkips = 0;
+                        waiting = false;
+                    } else if (m.type === "result") {
+                        waiting = false;
+                        done++;
+                        keep(inference, m.inferMs);
+                        keep(latency, performance.now() - m.sentAt);
+                        lastDirection = m.direction;
+                        if (recording) {
+                            records.push([m.t, m.frame, MODELS.indexOf(model) + 1, BACKENDS.indexOf(backend) + 1,
+                                m.prepMs, m.inferMs, performance.now() - m.sentAt, ...m.direction, ...m.pose]);
+                        }
+                    } else if (m.type === "error") {
+                        state = "ERROR";
+                        workerError = m.message;
+                        waiting = false;
+                    }
+                };
+
+                function load() {
+                    state = "loading";
+                    workerError = null;
+                    waiting = false;
+                    worker.postMessage({type: "load", model: model, backend: backend, size: grab.width});
+                }
+
+                modelButton.onclick = () => {
+                    model = MODELS[(MODELS.indexOf(model) + 1) % MODELS.length];
+                    modelButton.textContent = "Model: " + model;
+                    autoLabel();
+                    load();
+                };
+
+                backendButton.onclick = () => {
+                    backend = BACKENDS[(BACKENDS.indexOf(backend) + 1) % BACKENDS.length];
+                    backendButton.textContent = "Backend: " + backend;
+                    autoLabel();
+                    load();
+                };
+
+                rateButton.onclick = () => {
+                    rate = RATES[(RATES.indexOf(rate) + 1) % RATES.length];
+                    rateButton.textContent = rate ? rate + " /s" : "paused";
+                };
+
+                placeButton.onclick = () => {
+                    placeButton.textContent = placeSphere() ? "Place" : "No floor";
+                };
+
+                // Android shows no keyboard inside AR, so the label follows the settings unless it was typed by hand
+                function autoLabel() {
+                    const auto = MODELS.some((m) => BACKENDS.some((b) => label.value === "S2-" + m + "-" + b));
+                    if (!recording && auto) {
+                        label.value = "S2-" + model + "-" + backend;
+                    }
+                }
+
+                record.onclick = () => {
+                    if (recording) {
+                        recording = false;
+                        logger.stop();
+                        grab.stop();
+                        record.textContent = "Start";
+                    } else {
+                        records = [];
+                        recording = true;
+                        logger.label = label.value;
+                        logger.start();
+                        grab.start();
+                        record.textContent = "Stop";
+                    }
+                };
+
+                function downloadJSON(name, data) {
+                    const a = document.createElement("a");
+                    a.href = URL.createObjectURL(new Blob([JSON.stringify(data)], {type: "application/json"}));
+                    a.download = name;
+                    a.click();
+                    setTimeout(() => { URL.revokeObjectURL(a.href); }, 10000);
+                }
+
+                // Three files: the logger (dt), the grab (copy timings) and one row per answer from the network
+                downloadButton.onclick = () => {
+                    logger.download();
+                    grab.download(label.value);
+                    downloadJSON(label.value + "-infer.json", {
+                        label: label.value,
+                        savedAt: new Date().toISOString(),
+                        userAgent: navigator.userAgent,
+                        crossOriginIsolated: self.crossOriginIsolated,
+                        model: model,
+                        backend: backend,
+                        threads: threads,
+                        rate: rate,
+                        size: grab.width,
+                        warmup: warmup,
+                        columns: ["t", "frame", "model", "backend", "prep_ms", "infer_ms", "roundtrip_ms", "dir_x", "dir_y", "dir_z", "px", "py", "pz", "qx", "qy", "qz", "qw"],
+                        models: {1: "small", 2: "medium", 3: "large"},
+                        backends: {1: "wasm", 2: "webgpu"},
+                        rows: records
+                    });
+                };
+
+                // Frame time over the last 60 frames
+                const dts = [];
+                let lastTime = NaN;
+
+                const ms = (v) => Number.isFinite(v) ? v.toFixed(1) : "-";
+                const avg = (a) => a.length ? a.reduce((x, y) => x + y, 0) / a.length : NaN;
+                const pct = (a, p) => {
+                    if (!a.length) { return NaN; }
+                    const s = [...a].sort((x, y) => x - y);
+                    return s[Math.min(s.length - 1, Math.floor(s.length * p / 100))];
+                };
+
+                renderer.onFrame = (time) => {
+                    if (Number.isFinite(lastTime)) {
+                        dts.push(time - lastTime);
+                        if (dts.length > 60) { dts.shift(); }
+                    }
+                    lastTime = time;
+
+                    // Send the newest picture to the worker, at the chosen rate, never more than one at a time
+                    const now = performance.now();
+                    if (rate && state === "ready" && grab.pixels && grab.copies !== previewCopies) {
+                        if (now - lastSend >= 1000 / rate) {
+                            if (waiting) {
+                                busySkips++;
+                            } else {
+                                const copy = grab.pixels.slice();
+                                waiting = true;
+                                lastSend = now;
+                                sent++;
+                                worker.postMessage({
+                                    type: "run", pixels: copy.buffer, sentAt: now,
+                                    t: grab.pixelsTime, frame: grab.pixelsFrame, pose: grab.pixelsPose || [0, 0, 0, 0, 0, 0, 1]
+                                }, [copy.buffer]);
+                            }
+                        }
+                    }
+
+                    if (grab.pixels && grab.copies !== previewCopies && logger.frameCount % 5 === 0) {
+                        previewCopies = grab.copies;
+                        if (!previewImage) {
+                            previewImage = new ImageData(new Uint8ClampedArray(grab.pixels.buffer), grab.width, grab.height);
+                            preview.style.height = Math.round(96 * grab.cameraHeight / grab.cameraWidth) + "px";
+                        }
+                        previewContext.putImageData(previewImage, 0, 0);
+                    }
+
+                    if (logger.frameCount % 10 !== 0) {
+                        return;
+                    }
+
+                    const dtAvg = avg(dts);
+                    status.textContent =
+                        "frames " + logger.frameCount + "  rows " + logger.rowCount + (recording ? "  REC" : "") + "\n" +
+                        "dt avg/max  " + ms(dtAvg) + " / " + ms(Math.max(...dts)) + " ms  (" + (1000 / dtAvg).toFixed(1) + " fps)\n" +
+                        "grab " + ms(avg(grab.stats.total.values)) + " ms  copies " + grab.copies + "  spheres " + spheres + "\n" +
+                        "net " + model + "/" + backend + "  " + state + "  threads " + threads + "\n" +
+                        "sent " + sent + "  done " + done + "  busy " + busySkips + "\n" +
+                        "infer avg/p95/max  " + ms(avg(inference)) + " / " + ms(pct(inference, 95)) + " / " + ms(Math.max(...inference, NaN)) + " ms\n" +
+                        "roundtrip avg " + ms(avg(latency)) + " ms  answers " + (done && dts.length ? (1000 / (avg(latency) || 1)).toFixed(1) : "-") + "/s cap\n" +
+                        "warmup " + (warmup.length ? warmup.map((v) => v.toFixed(0)).join(", ") + " ms" : "-") + "\n" +
+                        "dir " + (lastDirection ? lastDirection.map((v) => v.toFixed(2)).join(", ") : "-") +
+                        (workerError ? "\nERROR " + workerError : "");
+                };
+
+                var button = document.getElementById("start");
+                button.onclick = () =>
+                {
+                    renderer.domContainer.appendChild(panel);
+                    renderer.domContainer.appendChild(preview);
+                    renderer.start().then(() => {
+                        // The renderer takes its overlay out of the page when the session ends, so the panel is put back
+                        renderer.xrSession.addEventListener("end", () => {
+                            document.body.appendChild(panel);
+                            document.body.appendChild(preview);
+                            button.textContent = "Start AR again";
+                        });
+                    }).catch((e) => { alert("Could not start AR: " + e.message); });
+                };
+
+                // Load the first network straight away, so the page is ready before AR starts
+                load();
+            })();
+        </script>
+	</body>
+</html>

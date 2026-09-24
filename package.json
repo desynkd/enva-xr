@@ -53,6 +53,10 @@
       "source": "example/spike-camera.html",
       "distDir": "./dist/examples/spike-camera"
     },
+    "example-spike-inference": {
+      "source": "example/spike-inference.html",
+      "distDir": "./dist/examples/spike-inference"
+    },
     "example-multi-feature": {
       "source": "example/multi-feature.html",
       "distDir": "./dist/examples/multi-feature"
@@ -79,15 +83,16 @@
     "@parcel/transformer-typescript-tsc": "2.8.3",
     "@parcel/transformer-typescript-types": "2.8.3",
     "@typescript-eslint/eslint-plugin": "5.57.0",
+    "cannon-es": "^0.20.0",
     "eslint": "8.11.0",
     "eslint-plugin-import": "2.25.4",
     "http-server": "14.1.1",
+    "onnxruntime-web": "^1.30.0",
     "parcel": "2.8.3",
     "parcel-reporter-static-files-copy": "^1.5.0",
     "process": "0.11.10",
-    "typescript": "5.0.2",
-    "cannon-es": "^0.20.0",
-    "three": "^0.150.0"
+    "three": "^0.150.0",
+    "typescript": "5.0.2"
   },
   "overrides": {
     "@parcel/cache": "2.8.3",
