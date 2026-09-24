@@ -109,7 +109,9 @@ self.onmessage = async (e) =>
 
 		if (message.type === "run")
 		{
-			if (!session)
+			// Held locally: loading another network replaces session while this run is still in flight
+			const running = session;
+			if (!running)
 			{
 				return;
 			}
@@ -123,10 +125,16 @@ self.onmessage = async (e) =>
 			const t1 = performance.now();
 			const feeds = {};
 			feeds[inputName] = new ort.Tensor("float32", input, [1, 3, size, size]);
-			const out = await session.run(feeds);
+			const out = await running.run(feeds);
 			const inferMs = performance.now() - t1;
 
-			const direction = Array.from(out[session.outputNames[0]].data).slice(0, 3);
+			if (running !== session)
+			{
+				// Another network was loaded while this ran, so the answer belongs to nothing
+				return;
+			}
+
+			const direction = Array.from(out[running.outputNames[0]].data).slice(0, 3);
 
 			self.postMessage({
 				type: "result",

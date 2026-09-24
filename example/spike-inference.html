@@ -201,20 +201,36 @@
                     }
                 }
 
+                // Settings are locked when recording starts, so the downloaded files carry the run that was actually made
+                let runLabel = label.value;
+                let runModel = model;
+                let runBackend = backend;
+
                 record.onclick = () => {
                     if (recording) {
                         recording = false;
                         logger.stop();
                         grab.stop();
                         record.textContent = "Start";
-                    } else {
-                        records = [];
-                        recording = true;
-                        logger.label = label.value;
-                        logger.start();
-                        grab.start();
-                        record.textContent = "Stop";
+                        return;
                     }
+
+                    if (state !== "ready") {
+                        // A run started while the network was still loading records nothing at all
+                        record.textContent = "wait: " + state;
+                        setTimeout(() => { record.textContent = "Start"; }, 2000);
+                        return;
+                    }
+
+                    records = [];
+                    recording = true;
+                    runLabel = label.value;
+                    runModel = model;
+                    runBackend = backend;
+                    logger.label = runLabel;
+                    logger.start();
+                    grab.start();
+                    record.textContent = "Stop";
                 };
 
                 function downloadJSON(name, data) {
@@ -228,14 +244,14 @@
                 // Three files: the logger (dt), the grab (copy timings) and one row per answer from the network
                 downloadButton.onclick = () => {
                     logger.download();
-                    grab.download(label.value);
-                    downloadJSON(label.value + "-infer.json", {
-                        label: label.value,
+                    grab.download(runLabel);
+                    downloadJSON(runLabel + "-infer.json", {
+                        label: runLabel,
                         savedAt: new Date().toISOString(),
                         userAgent: navigator.userAgent,
                         crossOriginIsolated: self.crossOriginIsolated,
-                        model: model,
-                        backend: backend,
+                        model: runModel,
+                        backend: runBackend,
                         threads: threads,
                         rate: rate,
                         size: grab.width,
