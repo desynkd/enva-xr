@@ -21,7 +21,8 @@
 			<button id="record">Start</button>
 			<button id="download">Download</button><br />
 			<button id="floor">Mark floor</button>
-			<button id="lamp">Mark lamp</button>
+			<button id="lampA">Mark lamp A</button>
+			<button id="lampB">Mark lamp B</button>
 			<button id="moved">Lamp moved</button>
 		</div>
         <script async src="./lib/es-module-shims.js"></script>
@@ -33,7 +34,7 @@
 			}
 		</script>
         <script type="module">
-            import {Mesh, MeshPhysicalMaterial, SphereGeometry, AmbientLight, Vector3} from "three";
+            import {Mesh, MeshPhysicalMaterial, SphereGeometry, AmbientLight} from "three";
             import {ARRenderer, Cursor, LightProbe, LightLogger, FloorPlane} from "../src/enva.ts";
 
             (async function () {
@@ -109,9 +110,11 @@
                     }
                 };
 
-                document.getElementById("lamp").onclick = () => {
-                    message = logger.markLamp(renderer) ? "lamp mark " + logger.lamps.length : "no viewer pose";
-                };
+                for (const spot of ["A", "B"]) {
+                    document.getElementById("lamp" + spot).onclick = () => {
+                        message = logger.markLamp(renderer, spot) ? "lamp " + spot + " mark " + logger.lamps[spot].length : "no viewer pose";
+                    };
+                }
 
                 document.getElementById("moved").onclick = () => {
                     logger.mark("lamp-moved");
@@ -127,10 +130,14 @@
                     }
 
                     const world = logger.latestWorldDirection;
-                    const truth = logger.trueDirection();
-                    const lamp = logger.lampPosition();
-                    const spread = lamp ? Math.max(...logger.lamps.map((l) => lamp.distanceTo(new Vector3().fromArray(l)))) : null;
-                    const angle = world && truth ? (world.angleTo(truth) * 180 / Math.PI).toFixed(1) + " deg" : "-";
+
+                    // One line per lamp spot: marks, spread and live error against that spot
+                    const lampLine = (spot) => {
+                        const truth = logger.trueDirection(spot);
+                        const spread = logger.lampSpread(spot);
+                        const angle = world && truth ? (world.angleTo(truth) * 180 / Math.PI).toFixed(1) + " deg" : "-";
+                        return "lamp " + spot + " " + logger.lamps[spot].length + (spread !== null ? " (spread " + (spread * 100).toFixed(1) + " cm)" : "") + "  error " + angle + "\n";
+                    };
 
                     status.textContent =
                         "frames " + logger.frameCount + "  rows " + logger.rowCount + (logger.recording ? "  REC" : "") + (logger.saved ? "" : "  unsaved") + "\n" +
@@ -138,8 +145,9 @@
                         "world  " + f(world ? world.toArray() : null) + "\n" +
                         "viewer " + f(logger.latestViewerPosition) + (logger.latestEmulated ? "  EMULATED" : "") + "\n" +
                         "changed " + (logger.latestChanged ? 1 : 0) + "  fallback " + (logger.latestFallback ? 1 : 0) + "\n" +
-                        "floor " + (logger.floor ? "ok" : "-") + "  lamps " + logger.lamps.length + (spread !== null ? " (spread " + (spread * 100).toFixed(1) + " cm)" : "") + "\n" +
-                        "true  " + f(truth ? truth.toArray() : null) + "  error " + angle + "\n" +
+                        "floor " + (logger.floor ? "ok" : "-") + "\n" +
+                        lampLine("A") +
+                        (logger.lamps.B.length > 0 ? lampLine("B") : "") +
                         message;
                 };
 

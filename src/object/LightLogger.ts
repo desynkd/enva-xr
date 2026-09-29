@@ -19,6 +19,11 @@ const COLUMNS = [
 ];
 
 const STRIDE = COLUMNS.length;
+
+/**
+ * Lamp spots that can be marked in one capture.
+ */
+export type LampSpot = "A" | "B";
 const C: {[name: string]: number} = {};
 COLUMNS.forEach((name, i) => { C[name] = i; });
 
@@ -67,9 +72,11 @@ export class LightLogger extends Group implements ARObject
 	public floor: number[] = null;
 
 	/**
-	 * Lamp marks in the reference space.
+	 * Lamp marks in the reference space, per lamp spot.
+	 *
+	 * A is where the lamp stands when recording starts, B is where it is slid to in lamp-move runs.
 	 */
-	public lamps: number[][] = [];
+	public lamps: {[spot in LampSpot]: number[][]} = {A: [], B: []};
 
 	/**
 	 * Time markers added during the capture.
@@ -143,9 +150,9 @@ export class LightLogger extends Group implements ARObject
 	}
 
 	/**
-	 * Mark the lamp position using the current device position (camera held against the bulb).
+	 * Mark a lamp spot using the current device position (camera held at the mouth of the lamp).
 	 */
-	public markLamp(renderer: ARRenderer): boolean
+	public markLamp(renderer: ARRenderer, spot: LampSpot = "A"): boolean
 	{
 		if (!renderer.xrViewerPose)
 		{
@@ -153,7 +160,7 @@ export class LightLogger extends Group implements ARObject
 		}
 
 		const p = renderer.xrViewerPose.transform.position;
-		this.lamps.push([p.x, p.y, p.z]);
+		this.lamps[spot].push([p.x, p.y, p.z]);
 		return true;
 	}
 
@@ -167,29 +174,44 @@ export class LightLogger extends Group implements ARObject
 	}
 
 	/**
-	 * Average of the lamp marks.
+	 * Average of the marks of one lamp spot.
 	 */
-	public lampPosition(): Vector3
+	public lampPosition(spot: LampSpot = "A"): Vector3
 	{
-		if (this.lamps.length === 0)
+		const marks = this.lamps[spot];
+		if (marks.length === 0)
 		{
 			return null;
 		}
 
 		const mean = new Vector3();
-		for (const l of this.lamps)
+		for (const l of marks)
 		{
 			mean.add(new Vector3().fromArray(l));
 		}
-		return mean.divideScalar(this.lamps.length);
+		return mean.divideScalar(marks.length);
 	}
 
 	/**
-	 * Ground truth light direction, normalize(lamp - floor).
+	 * Largest distance (m) from a mark of one lamp spot to their average.
 	 */
-	public trueDirection(): Vector3
+	public lampSpread(spot: LampSpot = "A"): number
 	{
-		const lamp = this.lampPosition();
+		const lamp = this.lampPosition(spot);
+		if (!lamp)
+		{
+			return null;
+		}
+
+		return Math.max(...this.lamps[spot].map((l) => { return lamp.distanceTo(new Vector3().fromArray(l)); }));
+	}
+
+	/**
+	 * Ground truth light direction for one lamp spot, normalize(lamp - floor).
+	 */
+	public trueDirection(spot: LampSpot = "A"): Vector3
+	{
+		const lamp = this.lampPosition(spot);
 		if (!lamp || !this.floor)
 		{
 			return null;
@@ -285,8 +307,7 @@ export class LightLogger extends Group implements ARObject
 
 	public toCapture(): any
 	{
-		const lamp = this.lampPosition();
-		const trueDir = this.trueDirection();
+		const perSpot = (f: (spot: LampSpot) => any) => { return {A: f("A"), B: f("B")}; };
 		const rows: number[][] = [];
 		for (let r = 0; r < this.rowCount; r++)
 		{
@@ -301,9 +322,9 @@ export class LightLogger extends Group implements ARObject
 			fallbackToleranceDeg: this.fallbackToleranceDeg,
 			floor: this.floor,
 			lamps: this.lamps,
-			lampMean: lamp ? lamp.toArray() : null,
-			lampSpread: lamp ? Math.max(...this.lamps.map((l) => { return lamp.distanceTo(new Vector3().fromArray(l)); })) : null,
-			trueDirection: trueDir ? trueDir.toArray() : null,
+			lampMean: perSpot((spot) => { const l = this.lampPosition(spot); return l ? l.toArray() : null; }),
+			lampSpread: perSpot((spot) => { return this.lampSpread(spot); }),
+			trueDirection: perSpot((spot) => { const d = this.trueDirection(spot); return d ? d.toArray() : null; }),
 			markers: this.markers,
 			columns: COLUMNS,
 			rows: rows
