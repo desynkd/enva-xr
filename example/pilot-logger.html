@@ -79,8 +79,6 @@
                 const record = document.getElementById("record");
                 let message = "";
 
-                renderer.domContainer.appendChild(panel);
-
                 // Taps on the panel must not place spheres or trigger XR select events
                 panel.addEventListener("dblclick", (e) => e.stopPropagation());
                 panel.addEventListener("beforexrselect", (e) => e.preventDefault());
@@ -120,6 +118,9 @@
                     logger.mark("lamp-moved");
                     message = "marker " + logger.markers.length;
                 };
+
+                // Moved last: the overlay container is not in the document until start(), so getElementById cannot find the panel's buttons after this
+                renderer.domContainer.appendChild(panel);
 
                 const f = (v) => v ? v.map((x) => x.toFixed(3)).join(", ") : "-";
 
