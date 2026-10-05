@@ -6,11 +6,11 @@
  *
  * Messages in:
  *   {type: "load", model, backend, size}   load a network and warm it up
- *   {type: "run", pixels, sentAt, t, frame, pose}   one picture, RGBA bytes, transferred
+ *   {type: "run", pixels, sentAt, t, frame, pose, aspect}   one picture, RGBA bytes, transferred
  *
  * Messages out:
  *   {type: "loaded", threads, isolated, warmup}
- *   {type: "result", inferMs, prepMs, direction, ...}
+ *   {type: "result", inferMs, prepMs, direction, peak, ...}
  *   {type: "error", message}
  */
 
@@ -21,14 +21,25 @@ importScripts("ort/ort.webgpu.min.js");
 
 const WARMUP = 5;
 
-// Pictures are RGBA bytes from the camera grab; networks want planar RGB, scaled the usual ImageNet way
+// Pictures are RGBA bytes from the camera grab; the stand-in networks want planar RGB, scaled the usual ImageNet way
 const MEAN = [0.485, 0.456, 0.406];
 const STD = [0.229, 0.224, 0.225];
+
+// The one trained network: the EMLight regression network (Zhan et al., AAAI 2021), exported by
+// emlight-experiment/pytorch/export_onnx.py. It wants a 4:3 picture scaled its own way, see prepareTrained.
+const TRAINED = "emlight";
+const TRAINED_WIDTH = 256;
+const TRAINED_HEIGHT = 192;
 
 let session = null;
 let inputName = null;
 let size = 256;
 let input = null;
+let trained = false;
+let inWidth = 256;
+let inHeight = 256;
+let resampled = null;
+const histogram = new Uint32Array(256);
 
 function threadCount()
 {
@@ -45,7 +56,11 @@ async function load(message)
 {
 	session = null;
 	size = message.size || 256;
-	input = new Float32Array(3 * size * size);
+	trained = message.model === TRAINED;
+	inWidth = trained ? TRAINED_WIDTH : size;
+	inHeight = trained ? TRAINED_HEIGHT : size;
+	input = new Float32Array(3 * inWidth * inHeight);
+	resampled = new Float32Array(3 * inWidth * inHeight);
 
 	ort.env.wasm.wasmPaths = new URL("ort/", self.location.href).href;
 	ort.env.wasm.numThreads = threadCount();
@@ -68,15 +83,90 @@ async function load(message)
 	for (let i = 0; i < WARMUP; i++)
 	{
 		const t0 = performance.now();
-		await infer(blank);
+		prepare(blank, 1);
+		await session.run(feed());
 		warmup.push(performance.now() - t0);
 	}
 
 	self.postMessage({type: "loaded", threads: ort.env.wasm.numThreads, isolated: self.crossOriginIsolated, warmup: warmup});
 }
 
-function prepare(pixels)
+/**
+ * Prepare a picture for the trained network, the same way emlight-experiment/pytorch/infer.py does.
+ *
+ * The camera grab squashes the whole camera image into a square. The network was trained on 4:3 landscape
+ * crops, so the middle 4:3 part of the camera image is cut out and stretched back to its true shape.
+ * Then the values are scaled so that their median becomes 0.5, as the training pictures were.
+ *
+ * aspect is the camera image width over height.
+ */
+function prepareTrained(pixels, aspect)
 {
+	const target = inWidth / inHeight;
+	const cropW = aspect > target ? size * target / aspect : size;
+	const cropH = aspect > target ? size : size * aspect / target;
+	const x0 = (size - cropW) / 2;
+	const y0 = (size - cropH) / 2;
+	const area = inWidth * inHeight;
+
+	histogram.fill(0);
+	let count = 0;
+
+	for (let v = 0, i = 0; v < inHeight; v++)
+	{
+		const sy = Math.min(size - 1, Math.max(0, y0 + (v + 0.5) * cropH / inHeight - 0.5));
+		const ya = Math.floor(sy), yb = Math.min(size - 1, ya + 1), fy = sy - ya;
+
+		for (let u = 0; u < inWidth; u++, i++)
+		{
+			const sx = Math.min(size - 1, Math.max(0, x0 + (u + 0.5) * cropW / inWidth - 0.5));
+			const xa = Math.floor(sx), xb = Math.min(size - 1, xa + 1), fx = sx - xa;
+			const aa = (ya * size + xa) * 4, ab = (ya * size + xb) * 4, ba = (yb * size + xa) * 4, bb = (yb * size + xb) * 4;
+
+			for (let c = 0; c < 3; c++)
+			{
+				const top = pixels[aa + c] * (1 - fx) + pixels[ab + c] * fx;
+				const bottom = pixels[ba + c] * (1 - fx) + pixels[bb + c] * fx;
+				const value = top * (1 - fy) + bottom * fy;
+				resampled[c * area + i] = value;
+
+				const bin = Math.round(value);
+				if (bin > 0)
+				{
+					histogram[bin]++;
+					count++;
+				}
+			}
+		}
+	}
+
+	// Median of the non-zero values, read off the histogram
+	let median = 0;
+	for (let bin = 1, seen = 0; bin < 256; bin++)
+	{
+		seen += histogram[bin];
+		if (seen * 2 >= count)
+		{
+			median = bin;
+			break;
+		}
+	}
+
+	const scale = median > 0 ? 0.5 / median : 0;
+	for (let i = 0; i < 3 * area; i++)
+	{
+		input[i] = Math.min(1, resampled[i] * scale);
+	}
+}
+
+function prepare(pixels, aspect)
+{
+	if (trained)
+	{
+		prepareTrained(pixels, aspect);
+		return;
+	}
+
 	const area = size * size;
 	for (let i = 0, p = 0; i < area; i++, p += 4)
 	{
@@ -86,13 +176,35 @@ function prepare(pixels)
 	}
 }
 
-async function infer(pixels)
+function feed()
 {
-	prepare(pixels);
 	const feeds = {};
-	feeds[inputName] = new ort.Tensor("float32", input, [1, 3, size, size]);
-	const out = await session.run(feeds);
-	return out[session.outputNames[0]].data;
+	feeds[inputName] = new ort.Tensor("float32", input, [1, 3, inHeight, inWidth]);
+	return feeds;
+}
+
+/**
+ * How much of the positive anchor weight sits on the strongest anchor. Near 1 means one clear light.
+ * Only the trained network has anchor weights; for the stand-ins this is NaN.
+ */
+function peakShare(distribution)
+{
+	if (!distribution)
+	{
+		return NaN;
+	}
+
+	let sum = 0, max = 0;
+	for (const w of distribution.data)
+	{
+		if (w > 0)
+		{
+			sum += w;
+			max = Math.max(max, w);
+		}
+	}
+
+	return sum > 0 ? max / sum : 0;
 }
 
 self.onmessage = async (e) =>
@@ -119,13 +231,11 @@ self.onmessage = async (e) =>
 			const pixels = new Uint8ClampedArray(message.pixels);
 
 			const t0 = performance.now();
-			prepare(pixels);
+			prepare(pixels, message.aspect || 1);
 			const prepMs = performance.now() - t0;
 
 			const t1 = performance.now();
-			const feeds = {};
-			feeds[inputName] = new ort.Tensor("float32", input, [1, 3, size, size]);
-			const out = await running.run(feeds);
+			const out = await running.run(feed());
 			const inferMs = performance.now() - t1;
 
 			if (running !== session)
@@ -143,6 +253,7 @@ self.onmessage = async (e) =>
 				prepMs: prepMs,
 				inferMs: inferMs,
 				direction: direction,
+				peak: peakShare(out.distribution),
 				sentAt: message.sentAt,
 				t: message.t,
 				frame: message.frame,

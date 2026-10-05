@@ -22,7 +22,8 @@
 			<button id="model">Model: small</button>
 			<button id="backend">Backend: wasm</button>
 			<button id="rate">10 /s</button>
-			<button id="place">Place</button><br />
+			<button id="place">Place</button>
+			<button id="light">Light: xr</button><br />
 			<input id="label" type="text" value="S2-small-wasm" />
 			<button id="record">Start</button>
 			<button id="download">Download</button>
@@ -36,7 +37,7 @@
 			}
 		</script>
         <script type="module">
-            import {Mesh, MeshPhysicalMaterial, SphereGeometry, AmbientLight} from "three";
+            import {Mesh, MeshPhysicalMaterial, SphereGeometry, AmbientLight, Vector3, Quaternion} from "three";
             import {ARRenderer, Cursor, LightProbe, LightLogger, FloorPlane, CameraGrab} from "../src/enva.ts";
 
             // Spike 2: send the 256x256 picture from spike 1 to a network running in a background thread,
@@ -99,6 +100,7 @@
                 const rateButton = document.getElementById("rate");
                 const placeButton = document.getElementById("place");
                 const downloadButton = document.getElementById("download");
+                const lightButton = document.getElementById("light");
                 const preview = document.getElementById("preview");
                 const previewContext = preview.getContext("2d");
                 let previewImage = null;
@@ -108,9 +110,46 @@
                 // The URL is built at runtime so Parcel leaves the file alone instead of bundling it.
                 const worker = new Worker(new URL("spike-inference-worker.js", document.baseURI).href);
 
-                const MODELS = ["small", "medium", "large"];
+                // small, medium and large are untrained stand-ins. emlight is the trained EMLight regression
+                // network (Zhan et al., AAAI 2021), the only one whose direction means anything.
+                const MODELS = ["small", "medium", "large", "emlight"];
+                const TRAINED = "emlight";
                 const BACKENDS = ["wasm", "webgpu"];
-                const RATES = [10, 5, 0];
+                const RATES = [10, 5, 1, 0];
+
+                // Which direction the shadow-casting light follows: Chrome's own estimate, or the network
+                const LIGHTS = ["xr", "net"];
+                let light = LIGHTS[0];
+
+                const UP = new Vector3(0, 1, 0);
+                const NO_WORLD = [NaN, NaN, NaN];
+
+                /**
+                 * Turn a direction from the trained network into room coordinates, pointing towards the light.
+                 *
+                 * ASSUMED, read from the EMLight code and not yet checked against a real lamp:
+                 * the network's frame is a level panorama centred on where the camera looks, with z up,
+                 * -x forwards and -y to the right. So the answer is taken as a heading relative to where the
+                 * camera faces along the floor, and a height relative to gravity, not relative to the camera's tilt.
+                 */
+                function toWorld(d, pose) {
+                    const q = new Quaternion(pose[3], pose[4], pose[5], pose[6]);
+                    const forward = new Vector3(0, 0, -1).applyQuaternion(q);
+                    forward.y = 0;
+                    if (forward.lengthSq() < 1e-4) {
+                        // Looking straight down or up: the top of the picture is then the way forwards
+                        forward.set(0, 1, 0).applyQuaternion(q);
+                        forward.y = 0;
+                    }
+                    forward.normalize();
+                    const right = new Vector3().crossVectors(forward, UP);
+
+                    return new Vector3()
+                        .addScaledVector(forward, -d[0])
+                        .addScaledVector(right, -d[1])
+                        .addScaledVector(UP, d[2])
+                        .normalize();
+                }
 
                 let model = MODELS[0];
                 let backend = BACKENDS[0];
@@ -129,6 +168,8 @@
                 let lastSend = 0;
                 let lost = 0;
                 let lastDirection = null;
+                let lastWorld = null;
+                let lastPeak = NaN;
                 let workerError = null;
                 let records = [];
                 let recording = false;
@@ -153,9 +194,12 @@
                         keep(inference, m.inferMs);
                         keep(latency, performance.now() - m.sentAt);
                         lastDirection = m.direction;
+                        lastWorld = model === TRAINED ? toWorld(m.direction, m.pose) : null;
+                        lastPeak = m.peak;
                         if (recording) {
                             records.push([m.t, m.frame, MODELS.indexOf(model) + 1, BACKENDS.indexOf(backend) + 1,
-                                m.prepMs, m.inferMs, performance.now() - m.sentAt, ...m.direction, ...m.pose]);
+                                m.prepMs, m.inferMs, performance.now() - m.sentAt, ...m.direction, ...m.pose,
+                                ...(lastWorld ? lastWorld.toArray() : NO_WORLD), m.peak]);
                         }
                     } else if (m.type === "stale") {
                         waiting = false;
@@ -170,6 +214,9 @@
                     state = "loading";
                     workerError = null;
                     waiting = false;
+                    lastDirection = null;
+                    lastWorld = null;
+                    lastPeak = NaN;
                     worker.postMessage({type: "load", model: model, backend: backend, size: grab.width});
                 }
 
@@ -194,6 +241,11 @@
 
                 placeButton.onclick = () => {
                     placeButton.textContent = placeSphere() ? "Place" : "No floor";
+                };
+
+                lightButton.onclick = () => {
+                    light = LIGHTS[(LIGHTS.indexOf(light) + 1) % LIGHTS.length];
+                    lightButton.textContent = "Light: " + light;
                 };
 
                 // Android shows no keyboard inside AR, so the label follows the settings unless it was typed by hand
@@ -259,8 +311,9 @@
                         rate: rate,
                         size: grab.width,
                         warmup: warmup,
-                        columns: ["t", "frame", "model", "backend", "prep_ms", "infer_ms", "roundtrip_ms", "dir_x", "dir_y", "dir_z", "px", "py", "pz", "qx", "qy", "qz", "qw"],
-                        models: {1: "small", 2: "medium", 3: "large"},
+                        light: light,
+                        columns: ["t", "frame", "model", "backend", "prep_ms", "infer_ms", "roundtrip_ms", "dir_x", "dir_y", "dir_z", "px", "py", "pz", "qx", "qy", "qz", "qw", "world_x", "world_y", "world_z", "peak"],
+                        models: {1: "small", 2: "medium", 3: "large", 4: "emlight"},
                         backends: {1: "wasm", 2: "webgpu"},
                         rows: records
                     });
@@ -285,6 +338,11 @@
                     }
                     lastTime = time;
 
+                    // The light probe has already set the light from Chrome's estimate this frame, so this replaces it
+                    if (light === "net" && lastWorld) {
+                        lightProbe.directional.position.copy(lastWorld).multiplyScalar(lightProbe.lightHeight);
+                    }
+
                     // Send the newest picture to the worker, at the chosen rate, never more than one at a time
                     const now = performance.now();
                     if (waiting && now - lastSend > 5000) {
@@ -303,7 +361,8 @@
                                 sent++;
                                 worker.postMessage({
                                     type: "run", pixels: copy.buffer, sentAt: now,
-                                    t: grab.pixelsTime, frame: grab.pixelsFrame, pose: grab.pixelsPose || [0, 0, 0, 0, 0, 0, 1]
+                                    t: grab.pixelsTime, frame: grab.pixelsFrame, pose: grab.pixelsPose || [0, 0, 0, 0, 0, 0, 1],
+                                    aspect: grab.cameraHeight ? grab.cameraWidth / grab.cameraHeight : 1
                                 }, [copy.buffer]);
                             }
                         }
@@ -332,7 +391,9 @@
                         "infer avg/p95/max  " + ms(avg(inference)) + " / " + ms(pct(inference, 95)) + " / " + ms(Math.max(...inference, NaN)) + " ms\n" +
                         "roundtrip avg " + ms(avg(latency)) + " ms  answers " + (done && dts.length ? (1000 / (avg(latency) || 1)).toFixed(1) : "-") + "/s cap\n" +
                         "warmup " + (warmup.length ? warmup.map((v) => v.toFixed(0)).join(", ") + " ms" : "-") + "\n" +
-                        "dir " + (lastDirection ? lastDirection.map((v) => v.toFixed(2)).join(", ") : "-") +
+                        "dir " + (lastDirection ? lastDirection.map((v) => v.toFixed(2)).join(", ") : "-") + "\n" +
+                        "world " + (lastWorld ? lastWorld.toArray().map((v) => v.toFixed(2)).join(", ") +
+                            "  up " + (Math.asin(lastWorld.y) * 180 / Math.PI).toFixed(0) + " deg  peak " + lastPeak.toFixed(2) : "-") +
                         (workerError ? "\nERROR " + workerError : "");
                 };
 
