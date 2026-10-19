@@ -14,17 +14,25 @@
 	  </head>
 	<body>
 		<button id="start" style="display: block; position: absolute; background-color: #FF6666; width: 100%; height: 100%; top: 0px; left: 0px; text-align: center; font-family: Arial, Helvetica, sans-serif; font-size: 10vh">
-			Start AR<br/>(spike 2)
+			Start AR<br/>(spike 4)
 		</button>
 		<canvas id="preview" width="256" height="256"></canvas>
 		<div id="panel">
 			<div id="status"></div>
-			<button id="model">Model: small</button>
-			<button id="backend">Backend: wasm</button>
-			<button id="rate">10 /s</button>
+			<button id="run">Run 1</button>
+			<button id="model">Model: flea</button>
+			<button id="backend">Backend: webgpu</button>
+			<button id="rate">5 /s</button>
 			<button id="place">Place</button>
-			<button id="light">Light: xr</button><br />
-			<input id="label" type="text" value="S2-small-wasm" />
+			<button id="light">Light: net</button>
+			<button id="frames">Frames: on</button>
+			<button id="crop">Crop: on</button>
+			<button id="smooth">Smooth: off</button><br />
+			<button id="floor">Mark floor</button>
+			<button id="lampA">Mark lamp A</button>
+			<button id="lampB">Mark lamp B</button>
+			<button id="moved">Lamp moved</button><br />
+			<input id="label" type="text" value="S4-1" />
 			<button id="record">Start</button>
 			<button id="download">Download</button>
 		</div>
@@ -42,6 +50,8 @@
 
             // Spike 2: send the 256x256 picture from spike 1 to a network running in a background thread,
             // and measure how long each answer takes and what it does to the AR frame time.
+            // Spike 3: the same with the trained network, scored against a lamp marked in the session.
+            // Spike 4: the same with FLEA, and the pictures sent to the network are saved for replay on the laptop.
             (async function () {
                 const renderer = new ARRenderer({
                     domOverlay: true,
@@ -101,7 +111,19 @@
                 const placeButton = document.getElementById("place");
                 const downloadButton = document.getElementById("download");
                 const lightButton = document.getElementById("light");
+                const framesButton = document.getElementById("frames");
+                const cropButton = document.getElementById("crop");
+                const smoothButton = document.getElementById("smooth");
+                const movedButton = document.getElementById("moved");
+                const runButton = document.getElementById("run");
+                const floorButton = document.getElementById("floor");
+                const lampButtons = {A: document.getElementById("lampA"), B: document.getElementById("lampB")};
                 const preview = document.getElementById("preview");
+                let message = "";
+
+                // Taps on the panel must not place spheres or trigger XR select events
+                panel.addEventListener("dblclick", (e) => e.stopPropagation());
+                panel.addEventListener("beforexrselect", (e) => e.preventDefault());
                 const previewContext = preview.getContext("2d");
                 let previewImage = null;
                 let previewCopies = 0;
@@ -111,9 +133,11 @@
                 const worker = new Worker(new URL("spike-inference-worker.js", document.baseURI).href);
 
                 // small, medium and large are untrained stand-ins. emlight is the trained EMLight regression
-                // network (Zhan et al., AAAI 2021), the only one whose direction means anything.
-                const MODELS = ["small", "medium", "large", "emlight"];
-                const TRAINED = "emlight";
+                // network (Zhan et al., AAAI 2021); flea is FLEA (Gio Sanchez, 2026, CC BY-NC 4.0). Only the
+                // trained ones give a direction that means anything.
+                const MODELS = ["small", "medium", "large", "emlight", "flea"];
+                const TRAINED = new Set(["emlight", "flea"]);
+                const DEFAULT_MODEL = "flea";
                 const BACKENDS = ["wasm", "webgpu"];
                 const RATES = [10, 5, 1, 0];
 
@@ -151,9 +175,74 @@
                         .normalize();
                 }
 
-                let model = MODELS[0];
-                let backend = BACKENDS[0];
-                let rate = RATES[0];
+                const NO_RIG = new Array(12).fill(NaN);
+
+                /**
+                 * Turn a FLEA key-light direction into room coordinates, pointing towards the light.
+                 *
+                 * FLEA's frame is camera space with x right, y up and +z towards the viewer, which is exactly
+                 * WebXR view space. pose is the camera view's transform in the reference space, so only its
+                 * rotation is needed (a direction ignores the position).
+                 */
+                function fleaToWorld(d, pose) {
+                    return new Vector3(d[0], d[1], d[2])
+                        .applyQuaternion(new Quaternion(pose[3], pose[4], pose[5], pose[6]))
+                        .normalize();
+                }
+
+                // Room direction for a trained network's answer, null for the stand-ins
+                function worldOf(m, d, pose) {
+                    if (m === "flea") {
+                        return fleaToWorld(d, pose);
+                    }
+                    if (m === "emlight") {
+                        return toWorld(d, pose);
+                    }
+                    return null;
+                }
+
+                // The runs of spike 4, in the order they are made (spikes/Spike-4.md). 1-4 are the core runs.
+                // lamp is the marked spot the run is scored against; what is shown on the page as a reminder.
+                // Settings can still be changed with the buttons.
+                const RUNS = {
+                    1: {lamp: "A", smooth: false, what: "core: still, south of cross, lamp A on your LEFT, 60 s"},
+                    2: {lamp: "A", smooth: false, what: "core: still, north of cross, lamp A on your RIGHT, 60 s"},
+                    3: {lamp: "A", smooth: false, what: "core: walk round, lamp at A, swing out behind it, 90 s"},
+                    4: {lamp: "B", smooth: false, what: "core: walk round, lamp at B, swing out behind it, 90 s"},
+                    5: {lamp: "A", smooth: true, what: "extra: demo video, smooth on, screen record, walk round, 60 s"},
+                    6: {lamp: "A>B", smooth: false, what: "extra: as run 1, carry lamp to B at 40 s, aim, press Lamp moved, 90 s"},
+                    7: {lamp: "A", smooth: false, what: "extra: east of cross facing west, shallow, bulb in picture, 30 s"}
+                };
+                const RUN_COUNT = 7;
+                for (const r in RUNS) {
+                    Object.assign(RUNS[r], {backend: "webgpu", rate: 5, light: "net"});
+                }
+
+                // The chosen run and how often each run was already saved are kept across reloads,
+                // because every run is a fresh session and Android shows no keyboard inside AR.
+                const STORE = "spike4-runs";
+                let stored = {run: 1, saves: {}};
+                try {
+                    stored = Object.assign(stored, JSON.parse(localStorage.getItem(STORE)));
+                } catch (e) {}
+                const store = () => { try { localStorage.setItem(STORE, JSON.stringify(stored)); } catch (e) {} };
+
+                let run = RUNS[stored.run] ? stored.run : 1;
+                let model = DEFAULT_MODEL;
+                let backend = RUNS[run].backend;
+                let rate = RUNS[run].rate;
+                light = RUNS[run].light;
+
+                // Crop: the grab keeps the centre square of the camera image at full sharpness, which is what FLEA
+                // expects. Off squashes the whole camera image into the square, as in spikes 1-3.
+                let cropOn = true;
+                grab.crop = cropOn;
+
+                // Smooth: display only. The light eases towards the newest answer instead of jumping to it.
+                // Every logged number stays raw.
+                const SMOOTH_S = 0.3;
+                let smoothOn = RUNS[run].smooth;
+                let shown = null;
 
                 // Worker state
                 let state = "no model";
@@ -174,6 +263,14 @@
                 let records = [];
                 let recording = false;
 
+                // Frame saving: a JPEG of every picture sent to the network while recording, for replay on the laptop
+                let framesOn = true;
+                let frames = [];
+                let framesDropped = 0;
+                let encoding = 0;
+                let recordingId = 0;
+                const MAX_ENCODING = 3;
+
                 const keep = (a, v) => { a.push(v); if (a.length > 120) { a.shift(); } return a; };
 
                 worker.onmessage = (e) => {
@@ -190,16 +287,22 @@
                         waiting = false;
                     } else if (m.type === "result") {
                         waiting = false;
+                        if (m.model !== model) {
+                            // Answered by the network loaded before the last switch, so it is not counted
+                            return;
+                        }
                         done++;
                         keep(inference, m.inferMs);
                         keep(latency, performance.now() - m.sentAt);
                         lastDirection = m.direction;
-                        lastWorld = model === TRAINED ? toWorld(m.direction, m.pose) : null;
+                        lastWorld = worldOf(model, m.direction, m.pose);
                         lastPeak = m.peak;
                         if (recording) {
                             records.push([m.t, m.frame, MODELS.indexOf(model) + 1, BACKENDS.indexOf(backend) + 1,
                                 m.prepMs, m.inferMs, performance.now() - m.sentAt, ...m.direction, ...m.pose,
-                                ...(lastWorld ? lastWorld.toArray() : NO_WORLD), m.peak]);
+                                ...(lastWorld ? lastWorld.toArray() : NO_WORLD), m.peak,
+                                ...(logger.latestWorldDirection ? logger.latestWorldDirection.toArray() : NO_WORLD),
+                                ...(m.rig ? m.rig : NO_RIG)]);
                         }
                     } else if (m.type === "stale") {
                         waiting = false;
@@ -248,18 +351,155 @@
                     lightButton.textContent = "Light: " + light;
                 };
 
-                // Android shows no keyboard inside AR, so the label follows the settings unless it was typed by hand
-                function autoLabel() {
-                    const auto = MODELS.some((m) => BACKENDS.some((b) => label.value === "S2-" + m + "-" + b));
-                    if (!recording && auto) {
-                        label.value = "S2-" + model + "-" + backend;
+                framesButton.onclick = () => {
+                    if (recording) {
+                        return;
                     }
+                    framesOn = !framesOn;
+                    framesButton.textContent = "Frames: " + (framesOn ? "on" : "off");
+                };
+
+                cropButton.onclick = () => {
+                    if (recording) {
+                        return;
+                    }
+                    cropOn = !cropOn;
+                    grab.crop = cropOn;
+                    previewImage = null;
+                    cropButton.textContent = "Crop: " + (cropOn ? "on" : "off");
+                };
+
+                smoothButton.onclick = () => {
+                    smoothOn = !smoothOn;
+                    smoothButton.textContent = "Smooth: " + (smoothOn ? "on" : "off");
+                };
+
+                // The moment the lamp was moved in run 6, for the time to settle on the new spot
+                movedButton.onclick = () => {
+                    logger.mark("lamp-moved");
+                    message = "lamp moved, marker " + logger.markers.length;
+                };
+
+                /**
+                 * Keep a JPEG of one 256x256 RGBA picture, off the critical path: the pixels are drawn into a canvas
+                 * straight away, the encode and the base64 step run later. When MAX_ENCODING encodes are already
+                 * under way the picture is dropped instead of queued.
+                 */
+                function saveFrame(pixels, frame, t, pose) {
+                    if (encoding >= MAX_ENCODING) {
+                        framesDropped++;
+                        return;
+                    }
+
+                    encoding++;
+                    const id = recordingId;
+                    const finished = () => { encoding--; };
+                    try {
+                        const image = new ImageData(new Uint8ClampedArray(pixels.buffer, pixels.byteOffset, grab.width * grab.height * 4), grab.width, grab.height);
+                        let blob;
+                        if (typeof OffscreenCanvas !== "undefined") {
+                            const canvas = new OffscreenCanvas(grab.width, grab.height);
+                            canvas.getContext("2d").putImageData(image, 0, 0);
+                            blob = canvas.convertToBlob({type: "image/jpeg", quality: 0.9});
+                        } else {
+                            const canvas = document.createElement("canvas");
+                            canvas.width = grab.width;
+                            canvas.height = grab.height;
+                            canvas.getContext("2d").putImageData(image, 0, 0);
+                            blob = new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.9));
+                        }
+
+                        blob.then((b) => new Promise((resolve, reject) => {
+                            const reader = new FileReader();
+                            reader.onload = () => resolve(reader.result);
+                            reader.onerror = () => reject(reader.error);
+                            reader.readAsDataURL(b);
+                        })).then((jpeg) => {
+                            // A frame finished after its run was stopped and a new one started belongs to nothing
+                            if (id === recordingId) {
+                                frames.push({frame: frame, t: t, pose: pose, jpeg: jpeg});
+                            }
+                        }).catch(() => { framesDropped++; }).finally(finished);
+                    } catch (e) {
+                        framesDropped++;
+                        finished();
+                    }
+                }
+
+                // S4-<run>, then b, c, ... for a run that was already saved, so a repeat never overwrites a file
+                function autoName() {
+                    const saves = Math.min(stored.saves[run] || 0, 25);
+                    return "S4-" + run + (saves ? String.fromCharCode(97 + saves) : "");
+                }
+
+                // Android shows no keyboard inside AR, so the label follows the run unless it was typed by hand
+                function autoLabel() {
+                    if (!recording && /^S4-\d+[a-z]?$/.test(label.value)) {
+                        label.value = autoName();
+                    }
+                }
+
+                function showSettings() {
+                    runButton.textContent = "Run " + run;
+                    modelButton.textContent = "Model: " + model;
+                    backendButton.textContent = "Backend: " + backend;
+                    rateButton.textContent = rate ? rate + " /s" : "paused";
+                    lightButton.textContent = "Light: " + light;
+                    smoothButton.textContent = "Smooth: " + (smoothOn ? "on" : "off");
+                }
+
+                runButton.onclick = () => {
+                    if (recording) {
+                        return;
+                    }
+
+                    run = run % RUN_COUNT + 1;
+                    stored.run = run;
+                    store();
+
+                    // A trained network chosen by hand is kept; a stand-in goes back to the default network
+                    const reload = !TRAINED.has(model) || backend !== RUNS[run].backend;
+                    model = TRAINED.has(model) ? model : DEFAULT_MODEL;
+                    backend = RUNS[run].backend;
+                    rate = RUNS[run].rate;
+                    light = RUNS[run].light;
+                    smoothOn = RUNS[run].smooth;
+                    showSettings();
+                    autoLabel();
+                    if (reload) {
+                        load();
+                    }
+                };
+
+                // Ground truth, marked the same way as in the pilot logger: the floor point under the cursor,
+                // and the lamp by holding the phone at it. Lamp B is the drift check after a run.
+                floorButton.onclick = () => {
+                    if (cursor.visible) {
+                        logger.markFloor(cursor.position);
+                        message = "floor marked";
+                    } else {
+                        message = "no floor under cursor";
+                    }
+                };
+
+                for (const spot of ["A", "B"]) {
+                    lampButtons[spot].onclick = () => {
+                        message = logger.markLamp(renderer, spot) ? "lamp " + spot + " mark " + logger.lamps[spot].length : "no viewer pose";
+                    };
                 }
 
                 // Settings are locked when recording starts, so the downloaded files carry the run that was actually made
                 let runLabel = label.value;
                 let runModel = model;
                 let runBackend = backend;
+                let runRate = rate;
+                let runLight = light;
+                let runNumber = run;
+                let runFrames = framesOn;
+                let runAspect = NaN;
+                let runCrop = cropOn;
+                let runSmooth = smoothOn;
+                let unsaved = false;
 
                 record.onclick = () => {
                     if (recording) {
@@ -278,10 +518,21 @@
                     }
 
                     records = [];
+                    frames = [];
+                    framesDropped = 0;
+                    recordingId++;
+                    runFrames = framesOn;
+                    runAspect = NaN;
+                    runCrop = cropOn;
+                    runSmooth = smoothOn;
                     recording = true;
                     runLabel = label.value;
                     runModel = model;
                     runBackend = backend;
+                    runRate = rate;
+                    runLight = light;
+                    runNumber = run;
+                    unsaved = true;
                     logger.label = runLabel;
                     logger.start();
                     grab.start();
@@ -296,27 +547,75 @@
                     setTimeout(() => { URL.revokeObjectURL(a.href); }, 10000);
                 }
 
-                // Three files: the logger (dt), the grab (copy timings) and one row per answer from the network
+                // Three files: the logger (dt), the grab (copy timings) and one row per answer from the network.
+                // The infer file carries the ground truth too, so a run can be analysed from it alone.
+                // With frame saving on, a fourth file holds a JPEG of every picture that was sent to the network.
                 downloadButton.onclick = () => {
+                    const perSpot = (f) => ({A: f("A"), B: f("B")});
+                    const array = (v) => v ? v.toArray() : null;
+
                     logger.download();
                     grab.download(runLabel);
                     downloadJSON(runLabel + "-infer.json", {
+                        experiment: "spike-4",
                         label: runLabel,
+                        run: runNumber,
                         savedAt: new Date().toISOString(),
                         userAgent: navigator.userAgent,
                         crossOriginIsolated: self.crossOriginIsolated,
                         model: runModel,
                         backend: runBackend,
                         threads: threads,
-                        rate: rate,
+                        rate: runRate,
                         size: grab.width,
                         warmup: warmup,
-                        light: light,
-                        columns: ["t", "frame", "model", "backend", "prep_ms", "infer_ms", "roundtrip_ms", "dir_x", "dir_y", "dir_z", "px", "py", "pz", "qx", "qy", "qz", "qw", "world_x", "world_y", "world_z", "peak"],
-                        models: {1: "small", 2: "medium", 3: "large", 4: "emlight"},
+                        light: runLight,
+                        // lampSpot: which marked spot the run is scored against ("A>B": A until the lamp-moved marker, then B)
+                        lampSpot: RUNS[runNumber] ? RUNS[runNumber].lamp : null,
+                        task: RUNS[runNumber] ? RUNS[runNumber].what : null,
+                        crop: runCrop,
+                        smooth: runSmooth,
+                        cameraWidth: grab.cameraWidth,
+                        cameraHeight: grab.cameraHeight,
+                        markers: logger.markers,
+                        floor: logger.floor,
+                        lamps: logger.lamps,
+                        lampMean: perSpot((spot) => array(logger.lampPosition(spot))),
+                        lampSpread: perSpot((spot) => logger.lampSpread(spot)),
+                        trueDirection: perSpot((spot) => array(logger.trueDirection(spot))),
+                        // world_* is the network's answer in room coordinates. xr_* is Chrome's own direction in room
+                        // coordinates at the moment the answer arrived, not at the moment the picture was taken.
+                        columns: ["t", "frame", "model", "backend", "prep_ms", "infer_ms", "roundtrip_ms", "dir_x", "dir_y", "dir_z", "px", "py", "pz", "qx", "qy", "qz", "qw", "world_x", "world_y", "world_z", "peak", "xr_x", "xr_y", "xr_z",
+                            "rig0", "rig1", "rig2", "rig3", "rig4", "rig5", "rig6", "rig7", "rig8", "rig9", "rig10", "rig11"],
+                        notes: "flea: peak is the key share rig5 (shown as conf on the page); dir is rig2..rig4 made unit length, camera space x right, y up, +z towards the viewer; world is dir rotated by the camera pose. rig0..rig11 = flood share, flood warmth, key x, y, z, key share, key warmth, back x, y, z, back share, back warmth; NaN (null in JSON) for the other models. emlight: peak is the share of the strongest anchor.",
+                        models: {1: "small", 2: "medium", 3: "large", 4: "emlight", 5: "flea"},
                         backends: {1: "wasm", 2: "webgpu"},
                         rows: records
                     });
+
+                    if (runFrames) {
+                        downloadJSON(runLabel + "-frames.json", {
+                            label: runLabel,
+                            width: grab.width,
+                            height: grab.height,
+                            // Camera width over height. With crop on, the picture is the centre square of the camera
+                            // image; with crop off, the whole camera image is squashed into the square picture.
+                            aspect: runAspect,
+                            crop: runCrop,
+                            flipY: grab.flipY,
+                            dropped: framesDropped,
+                            // frame is the grab's frame number (the infer file's frame column), t and pose as there
+                            frames: frames
+                        });
+                    }
+
+                    // Count the save once, so the next label for this run gets the next letter
+                    if (unsaved) {
+                        unsaved = false;
+                        stored.saves[runNumber] = (stored.saves[runNumber] || 0) + 1;
+                        store();
+                        autoLabel();
+                    }
                 };
 
                 // Frame time over the last 60 frames
@@ -338,9 +637,16 @@
                     }
                     lastTime = time;
 
-                    // The light probe has already set the light from Chrome's estimate this frame, so this replaces it
+                    // The light probe has already set the light from Chrome's estimate this frame, so this replaces it.
+                    // With smooth on, the shown direction eases towards the newest answer (display only).
                     if (light === "net" && lastWorld) {
-                        lightProbe.directional.position.copy(lastWorld).multiplyScalar(lightProbe.lightHeight);
+                        const dt = Number.isFinite(dts[dts.length - 1]) ? dts[dts.length - 1] / 1000 : 0;
+                        if (!smoothOn || !shown) {
+                            shown = lastWorld.clone();
+                        } else {
+                            shown.lerp(lastWorld, 1 - Math.exp(-dt / SMOOTH_S)).normalize();
+                        }
+                        lightProbe.directional.position.copy(shown).multiplyScalar(lightProbe.lightHeight);
                     }
 
                     // Send the newest picture to the worker, at the chosen rate, never more than one at a time
@@ -359,10 +665,18 @@
                                 waiting = true;
                                 lastSend = now;
                                 sent++;
+                                const pose = grab.pixelsPose || [0, 0, 0, 0, 0, 0, 1];
+                                const cameraAspect = grab.cameraHeight ? grab.cameraWidth / grab.cameraHeight : 1;
+                                // With crop on the picture is already the centre square, so the worker must not cut it again
+                                const aspect = grab.crop ? 1 : cameraAspect;
+                                if (recording && runFrames) {
+                                    runAspect = cameraAspect;
+                                    saveFrame(grab.pixels, grab.pixelsFrame, grab.pixelsTime, pose);
+                                }
                                 worker.postMessage({
                                     type: "run", pixels: copy.buffer, sentAt: now,
-                                    t: grab.pixelsTime, frame: grab.pixelsFrame, pose: grab.pixelsPose || [0, 0, 0, 0, 0, 0, 1],
-                                    aspect: grab.cameraHeight ? grab.cameraWidth / grab.cameraHeight : 1
+                                    t: grab.pixelsTime, frame: grab.pixelsFrame, pose: pose,
+                                    aspect: aspect
                                 }, [copy.buffer]);
                             }
                         }
@@ -372,7 +686,7 @@
                         previewCopies = grab.copies;
                         if (!previewImage) {
                             previewImage = new ImageData(new Uint8ClampedArray(grab.pixels.buffer), grab.width, grab.height);
-                            preview.style.height = Math.round(96 * grab.cameraHeight / grab.cameraWidth) + "px";
+                            preview.style.height = (grab.crop ? 96 : Math.round(96 * grab.cameraHeight / grab.cameraWidth)) + "px";
                         }
                         previewContext.putImageData(previewImage, 0, 0);
                     }
@@ -380,6 +694,16 @@
                     if (logger.frameCount % 10 !== 0) {
                         return;
                     }
+
+                    // One line per lamp spot: marks, spread, and the live error of the network and of Chrome
+                    const xrWorld = logger.latestWorldDirection;
+                    const lampLine = (spot) => {
+                        const truth = logger.trueDirection(spot);
+                        const spread = logger.lampSpread(spot);
+                        const error = (d) => d && truth ? (d.angleTo(truth) * 180 / Math.PI).toFixed(1) : "-";
+                        return "\nlamp " + spot + " " + logger.lamps[spot].length + (spread !== null ? " (spread " + (spread * 100).toFixed(1) + " cm)" : "") +
+                            "  error net " + error(lastWorld) + "  xr " + error(xrWorld) + " deg";
+                    };
 
                     const dtAvg = avg(dts);
                     status.textContent =
@@ -393,7 +717,14 @@
                         "warmup " + (warmup.length ? warmup.map((v) => v.toFixed(0)).join(", ") + " ms" : "-") + "\n" +
                         "dir " + (lastDirection ? lastDirection.map((v) => v.toFixed(2)).join(", ") : "-") + "\n" +
                         "world " + (lastWorld ? lastWorld.toArray().map((v) => v.toFixed(2)).join(", ") +
-                            "  up " + (Math.asin(lastWorld.y) * 180 / Math.PI).toFixed(0) + " deg  peak " + lastPeak.toFixed(2) : "-") +
+                            "  up " + (Math.asin(lastWorld.y) * 180 / Math.PI).toFixed(0) + " deg  " + (model === "flea" ? "conf " : "peak ") + lastPeak.toFixed(2) : "-") +
+                        "\nrun " + run + " (" + RUNS[run].what + ")" +
+                        "\nfloor " + (logger.floor ? "ok" : "-") + "  markers " + logger.markers.length +
+                        "  frames " + (recording ? (runFrames ? frames.length : "off") : (framesOn ? frames.length : "off")) +
+                        (framesDropped ? " (" + framesDropped + " dropped)" : "") + (unsaved && !recording ? "  unsaved" : "") +
+                        lampLine("A") +
+                        (logger.lamps.B.length > 0 ? lampLine("B") : "") +
+                        (message ? "\n" + message : "") +
                         (workerError ? "\nERROR " + workerError : "");
                 };
 
@@ -412,7 +743,9 @@
                     }).catch((e) => { alert("Could not start AR: " + e.message); });
                 };
 
-                // Load the first network straight away, so the page is ready before AR starts
+                // Load the network straight away, so the page is ready before AR starts
+                showSettings();
+                autoLabel();
                 load();
             })();
         </script>

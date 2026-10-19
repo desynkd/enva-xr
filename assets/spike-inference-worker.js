@@ -1,8 +1,18 @@
 /**
- * Spike 2 worker: runs a network on the small camera picture, off the main thread.
+ * Spike 2-4 worker: runs a network on the small camera picture, off the main thread.
  *
  * This file is served as-is from assets, outside the bundle, so it can load onnxruntime itself and
  * keep its own wasm files next to it.
+ *
+ * Networks (models/<name>.onnx):
+ *   small, medium, large   untrained stand-ins, the square picture scaled the ImageNet way (spike 2)
+ *   emlight                EMLight regression network (Zhan et al., AAAI 2021). Middle 4:3 part of the camera
+ *                          image at 256x192, median scaled to 0.5. Answer: the first output's first 3 numbers, in
+ *                          EMLight's own panorama frame; peak = share of the strongest anchor (spike 3)
+ *   flea                   FLEA, "Fast Lighting Estimation for AR" (Gio Sanchez, 2026, CC BY-NC 4.0, see
+ *                          models/FLEA-NOTICE.txt). Centre square of the camera image at 224x224, RGB / 255.
+ *                          Output "rig", 12 numbers; the key light direction rig[2:5] is in camera space
+ *                          (x right, y up, +z towards the viewer), pointing to the light; peak = key share rig[5] (spike 4)
  *
  * Messages in:
  *   {type: "load", model, backend, size}   load a network and warm it up
@@ -10,7 +20,8 @@
  *
  * Messages out:
  *   {type: "loaded", threads, isolated, warmup}
- *   {type: "result", inferMs, prepMs, direction, peak, ...}
+ *   {type: "result", inferMs, prepMs, direction, peak, rig, ...}   rig is the 12 FLEA numbers, null for other networks
+ *   {type: "stale", sentAt}
  *   {type: "error", message}
  */
 
@@ -25,17 +36,21 @@ const WARMUP = 5;
 const MEAN = [0.485, 0.456, 0.406];
 const STD = [0.229, 0.224, 0.225];
 
-// The one trained network: the EMLight regression network (Zhan et al., AAAI 2021), exported by
-// emlight-experiment/pytorch/export_onnx.py. It wants a 4:3 picture scaled its own way, see prepareTrained.
-const TRAINED = "emlight";
-const TRAINED_WIDTH = 256;
-const TRAINED_HEIGHT = 192;
+// The trained networks, each with its own input size and preparation.
+//   emlight: the EMLight regression network (Zhan et al., AAAI 2021), exported by
+//            emlight-experiment/pytorch/export_onnx.py. It wants a 4:3 picture scaled its own way, see prepareTrained.
+//   flea:    FLEA (Gio Sanchez, 2026), released as ONNX. It wants the centre square at 224, see prepareFlea.
+const TRAINED = {
+	emlight: {width: 256, height: 192, prepare: (pixels, aspect) => prepareTrained(pixels, aspect)},
+	flea: {width: 224, height: 224, prepare: (pixels, aspect) => prepareFlea(pixels, aspect)}
+};
 
 let session = null;
 let inputName = null;
 let size = 256;
 let input = null;
-let trained = false;
+let trained = null;
+let modelName = null;
 let inWidth = 256;
 let inHeight = 256;
 let resampled = null;
@@ -56,9 +71,10 @@ async function load(message)
 {
 	session = null;
 	size = message.size || 256;
-	trained = message.model === TRAINED;
-	inWidth = trained ? TRAINED_WIDTH : size;
-	inHeight = trained ? TRAINED_HEIGHT : size;
+	modelName = message.model;
+	trained = TRAINED[message.model] || null;
+	inWidth = trained ? trained.width : size;
+	inHeight = trained ? trained.height : size;
 	input = new Float32Array(3 * inWidth * inHeight);
 	resampled = new Float32Array(3 * inWidth * inHeight);
 
@@ -159,11 +175,50 @@ function prepareTrained(pixels, aspect)
 	}
 }
 
+/**
+ * Prepare a picture for FLEA, the same way its demo and candidates/kit/flea.py do: the centre square of the
+ * camera image, resized to 224x224, RGB / 255, planar. No mean/std and no brightness scaling.
+ *
+ * The camera grab squashes the whole camera image into the square, so the centre square of the camera image
+ * is the middle 1/aspect of the width (landscape) or the middle aspect of the height (portrait).
+ * Sampled bilinearly as in prepareTrained.
+ *
+ * aspect is the camera image width over height.
+ */
+function prepareFlea(pixels, aspect)
+{
+	const cropW = aspect > 1 ? size / aspect : size;
+	const cropH = aspect > 1 ? size : size * aspect;
+	const x0 = (size - cropW) / 2;
+	const y0 = (size - cropH) / 2;
+	const area = inWidth * inHeight;
+
+	for (let v = 0, i = 0; v < inHeight; v++)
+	{
+		const sy = Math.min(size - 1, Math.max(0, y0 + (v + 0.5) * cropH / inHeight - 0.5));
+		const ya = Math.floor(sy), yb = Math.min(size - 1, ya + 1), fy = sy - ya;
+
+		for (let u = 0; u < inWidth; u++, i++)
+		{
+			const sx = Math.min(size - 1, Math.max(0, x0 + (u + 0.5) * cropW / inWidth - 0.5));
+			const xa = Math.floor(sx), xb = Math.min(size - 1, xa + 1), fx = sx - xa;
+			const aa = (ya * size + xa) * 4, ab = (ya * size + xb) * 4, ba = (yb * size + xa) * 4, bb = (yb * size + xb) * 4;
+
+			for (let c = 0; c < 3; c++)
+			{
+				const top = pixels[aa + c] * (1 - fx) + pixels[ab + c] * fx;
+				const bottom = pixels[ba + c] * (1 - fx) + pixels[bb + c] * fx;
+				input[c * area + i] = (top * (1 - fy) + bottom * fy) / 255;
+			}
+		}
+	}
+}
+
 function prepare(pixels, aspect)
 {
 	if (trained)
 	{
-		prepareTrained(pixels, aspect);
+		trained.prepare(pixels, aspect);
 		return;
 	}
 
@@ -246,14 +301,30 @@ self.onmessage = async (e) =>
 				return;
 			}
 
-			const direction = Array.from(out[running.outputNames[0]].data).slice(0, 3);
+			let direction, peak, rig = null;
+			if (modelName === "flea")
+			{
+				// rig[2:5] is the key light, already near unit length; renormalised so the page gets a unit vector
+				rig = Array.from(out[running.outputNames[0]].data).slice(0, 12);
+				const d = rig.slice(2, 5);
+				const length = Math.hypot(d[0], d[1], d[2]) || 1;
+				direction = d.map((v) => v / length);
+				peak = rig[5];
+			}
+			else
+			{
+				direction = Array.from(out[running.outputNames[0]].data).slice(0, 3);
+				peak = peakShare(out.distribution);
+			}
 
 			self.postMessage({
 				type: "result",
+				model: modelName,
 				prepMs: prepMs,
 				inferMs: inferMs,
 				direction: direction,
-				peak: peakShare(out.distribution),
+				peak: peak,
+				rig: rig,
 				sentAt: message.sentAt,
 				t: message.t,
 				frame: message.frame,

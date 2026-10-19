@@ -25,11 +25,14 @@ const FRAGMENT = `#version 300 es
 precision mediump float;
 uniform sampler2D uCamera;
 uniform bool uFlipY;
+uniform vec2 uScale;
 in vec2 vUv;
 out vec4 color;
 void main()
 {
-	vec2 uv = uFlipY ? vec2(vUv.x, 1.0 - vUv.y) : vUv;
+	// uScale below 1 on one axis keeps only the centre of the camera image along that axis
+	vec2 uv = 0.5 + (vUv - 0.5) * uScale;
+	uv = uFlipY ? vec2(uv.x, 1.0 - uv.y) : uv;
 	color = vec4(texture(uCamera, uv).rgb, 1.0);
 }`;
 
@@ -108,6 +111,12 @@ export class CameraGrab extends Group implements ARObject
 	 * If true, row 0 of the pixels is the top of the camera image (assumes the camera texture has a bottom-left origin, as usual in WebGL).
 	 */
 	public flipY = true;
+
+	/**
+	 * If true, the small picture is the centre square of the camera image, at full sharpness.
+	 * If false, the whole camera image is squashed into the small picture.
+	 */
+	public crop = false;
 
 	/**
 	 * Latest small picture, RGBA, row 0 first.
@@ -208,6 +217,8 @@ export class CameraGrab extends Group implements ARObject
 	private uCamera: WebGLUniformLocation = null;
 
 	private uFlipY: WebGLUniformLocation = null;
+
+	private uScale: WebGLUniformLocation = null;
 
 	private slots: Slot[] = [];
 
@@ -332,6 +343,7 @@ export class CameraGrab extends Group implements ARObject
 		}
 		this.uCamera = gl.getUniformLocation(this.program, "uCamera");
 		this.uFlipY = gl.getUniformLocation(this.program, "uFlipY");
+		this.uScale = gl.getUniformLocation(this.program, "uScale");
 
 		// Empty vertex array, so the draw does not touch the attributes of three.js
 		this.vao = gl.createVertexArray();
@@ -436,6 +448,8 @@ export class CameraGrab extends Group implements ARObject
 		gl.bindTexture(gl.TEXTURE_2D, texture);
 		gl.uniform1i(this.uCamera, 0);
 		gl.uniform1i(this.uFlipY, this.flipY ? 1 : 0);
+		const aspect = camera.width / camera.height;
+		gl.uniform2f(this.uScale, this.crop && aspect > 1 ? 1 / aspect : 1, this.crop && aspect < 1 ? aspect : 1);
 		gl.drawArrays(gl.TRIANGLES, 0, 3);
 		gl.bindVertexArray(null);
 		const shrinkMs = performance.now() - t0;
@@ -520,6 +534,7 @@ export class CameraGrab extends Group implements ARObject
 			height: this.height,
 			every: this.every,
 			flipY: this.flipY,
+			crop: this.crop,
 			cameraWidth: this.cameraWidth,
 			cameraHeight: this.cameraHeight,
 			saturationLevel: this.saturationLevel,
